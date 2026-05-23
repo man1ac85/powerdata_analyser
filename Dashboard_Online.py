@@ -13,49 +13,37 @@ from requests.auth import HTTPBasicAuth
 import io
 import hashlib
 from sqlalchemy import text
-
-# --- NEU: Streamlit Native Connection ---
-# st.connection kümmert sich automatisch um Pooling und verhindert Port-Erschöpfung
+# --- DATENBANK VERBINDUNG (Neu & Stabil) ---
 def get_db_connection():
+    # 'st.connection' ist der moderne Streamlit-Weg, der automatisch 
+    # das Pooling übernimmt und Port-Erschöpfung verhindert.
     return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
 
 # --- LOGIN FUNKTION ---
 def check_login(username, password):
-    conn = get_db_connection()
-    # Streamlit connections nutzen .query() für SQL
-    # Wir müssen das Ergebnis als DataFrame abrufen
+    conn = get_db_connection() # Hier rufen wir jetzt die NEUE Funktion auf
+    
+    # SQL-Abfrage ausführen
     query_str = "SELECT password_hash, role FROM users WHERE name = :name"
     df = conn.query(query_str, params={"name": username})
     
     if not df.empty:
         stored_hash = df.iloc[0]['password_hash']
         role = df.iloc[0]['role']
+        
+        # Hash vergleichen
         input_hash = hashlib.sha256(password.encode()).hexdigest()
         
         if input_hash == stored_hash:
             return True, role
     return False, None
 
-# --- LOGIN FUNKTION & LOGIK ---
-def check_login(username, password):
-    engine = get_db_engine()
-    query = text("SELECT password_hash, role FROM users WHERE name = :name")
-    with engine.connect() as conn:
-        result = conn.execute(query, {"name": username}).fetchone()
-    if result:
-        stored_hash = result[0]
-        role = result[1]
-        input_hash = hashlib.sha256(password.encode()).hexdigest()
-        if input_hash == stored_hash:
-            return True, role
-    return False, None
-
-# Session States für Login initialisieren
+# --- SESSION STATES ---
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'role' not in st.session_state: st.session_state['role'] = None
 if 'user' not in st.session_state: st.session_state['user'] = None
 
-# --- DAS LOGIN-TOR ---
+# --- LOGIN-TOR ---
 if not st.session_state['logged_in']:
     st.title("🔒 Login erforderlich")
     user_in = st.text_input("Benutzername")
@@ -70,7 +58,7 @@ if not st.session_state['logged_in']:
             st.rerun()
         else:
             st.error("Benutzername oder Passwort falsch!")
-    st.stop()
+    st.stop() # Hält den Rest der App an
 
 # --- SESSION STATES (Rest) ---
 if 'manual_intervals' not in st.session_state: st.session_state['manual_intervals'] = []
