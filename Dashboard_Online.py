@@ -12,15 +12,17 @@ import requests
 from requests.auth import HTTPBasicAuth
 import io
 import hashlib
-from sqlalchemy import text
+from sqlalchemy import text, create_engine
+from sqlalchemy.pool import NullPool
 from supabase import create_client, Client
 
 # --- DATENBANK & KONFIGURATION ---
 st.set_page_config(page_title="FIT Analyzer Pro Cloud", layout="wide")
 
 def get_db_connection():
-    # Nutzt die Streamlit-eigene SQL-Verbindung (stabil für Supabase)
-    return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
+    # Wir nutzen NullPool, um Verbindungs-Erschöpfung in der Cloud zu vermeiden
+    # Bitte verwende in deiner DB_URL den Port 6543
+    return create_engine(st.secrets["DB_URL"], poolclass=NullPool, connect_args={"sslmode": "require"})
 
 @st.cache_resource
 def get_supabase_client():
@@ -69,34 +71,34 @@ if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_
 
 # --- DATENBANK HELFER (PostgreSQL ersetzt SQLite) ---
 def add_new_athlete(name, api_key):
-    conn = get_db_connection()
-    exists = conn.query("SELECT 1 FROM users WHERE name = :name", params={"name": name.strip()})
-    if not exists.empty:
-        return False, "Fehler: Ein Athlet mit diesem Namen existiert bereits."
-    with conn.session as s:
-        s.execute(text("INSERT INTO users (name, api_key) VALUES (:name, :api_key)"), 
-                  {"name": name.strip(), "api_key": api_key.strip()})
-        s.commit()
+    engine = get_db_connection()
+    with engine.connect() as conn:
+        exists = conn.execute(text("SELECT 1 FROM users WHERE name = :name"), {"name": name.strip()}).fetchone()
+        if exists:
+            return False, "Fehler: Ein Athlet mit diesem Namen existiert bereits."
+        conn.execute(text("INSERT INTO users (name, api_key) VALUES (:name, :api_key)"), 
+                     {"name": name.strip(), "api_key": api_key.strip()})
+        conn.commit()
     return True, f"Athleten-Profil für '{name}' erfolgreich angelegt!"
 
 def load_all_athletes():
-    conn = get_db_connection()
-    return conn.query("SELECT * FROM users")
+    engine = get_db_connection()
+    return pd.read_sql("SELECT * FROM users", engine)
 
 def check_duplicate_workout(date, workout_type, structure):
-    conn = get_db_connection()
-    result = conn.query("SELECT id FROM workouts WHERE date = :date AND type = :type AND structure = :structure",
-                        params={"date": date, "type": workout_type, "structure": structure})
-    return result.iloc[0]['id'] if not result.empty else None
+    engine = get_db_connection()
+    with engine.connect() as conn:
+        res = conn.execute(text("SELECT id FROM workouts WHERE date = :date AND type = :type AND structure = :structure"),
+                           {"date": date, "type": workout_type, "structure": structure}).fetchone()
+        return res[0] if res else None
 
 def save_workout_to_db(metadata, interval_list, overwrite_id=None):
-    conn = get_db_connection()
-    with conn.session as s:
+    engine = get_db_connection()
+    with engine.connect() as conn:
         if overwrite_id:
-            s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": overwrite_id})
+            conn.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": overwrite_id})
         
-        # Workout einfügen
-        res = s.execute(text("""
+        res = conn.execute(text("""
             INSERT INTO workouts (filename, date, type, structure, avg_power, max_power) 
             VALUES (:filename, :date, :type, :structure, :avg_p, :max_p) RETURNING id
         """), {
@@ -105,9 +107,8 @@ def save_workout_to_db(metadata, interval_list, overwrite_id=None):
         })
         workout_id = res.scalar()
         
-        # Intervalle einfügen
         for row in interval_list:
-            s.execute(text("""
+            conn.execute(text("""
                 INSERT INTO intervals (workout_id, interval_num, avg_power, avg_hr, max_hr, duration_sec, std_hr, avg_hr_p) 
                 VALUES (:wid, :num, :ap, :ahr, :mhr, :dur, :std, :ahrp)
             """), {
@@ -115,7 +116,7 @@ def save_workout_to_db(metadata, interval_list, overwrite_id=None):
                 "ahr": row['Ø Herzfrequenz'], "mhr": row['Max Herzfrequenz'], "dur": row['Dauer_sec'], 
                 "std": row['Abweichung HF+-'], "ahrp": row['Durschnittliche HF_P (20-80)']
             })
-        s.commit()
+        conn.commit()
     return True, "Daten erfolgreich in die Datenbank übernommen."
 
 def transfer_to_manual(timestamps):
@@ -443,16 +444,21 @@ elif nav_mode == "Aktuelles Training einlesen":
                                 st.session_state['manual_intervals'].pop(idx); st.rerun()
         except Exception as e: st.error(f"Fehler bei der Analyse: {e}")
 
+# --- HISTORIE ---
 elif nav_mode == "Historie & Vergleich":
     st.subheader("Datenbank-Historie & Vergleich")
-    conn = get_db_connection()
-    df_workouts = conn.query("SELECT * FROM workouts")
+    engine = get_db_connection()
+    df_workouts = pd.read_sql("SELECT * FROM workouts", engine)
     
     if df_workouts.empty: st.info("Datenbank leer.")
     else:
         filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"])
         if filter_type != "ALLE": df_workouts = df_workouts[df_workouts['type'] == filter_type]
         
+        search_query = st.text_input("Suche nach Dateiname/Datum:")
+        if search_query:
+             df_workouts = df_workouts[df_workouts['filename'].str.contains(search_query, case=False, na=False) | df_workouts['date'].str.contains(search_query, case=False, na=False)]
+
         selected_ids = []
         for idx, row in df_workouts.iterrows():
             col_check, col_del = st.columns([0.85, 0.15])
@@ -461,16 +467,15 @@ elif nav_mode == "Historie & Vergleich":
                     selected_ids.append(row['id'])
             with col_del:
                 if st.button("🗑️", key=f"del_{row['id']}"):
-                    with conn.session as s:
-                        s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": row['id']})
-                        s.commit()
+                    with engine.connect() as conn:
+                        conn.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": row['id']})
+                        conn.commit()
                     st.rerun()
 
-        # --- VERGLEICH ---
         if len(selected_ids) >= 2:
             st.markdown("---")
             ids_string = ",".join(map(str, selected_ids))
-            df_compare = conn.query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})")
+            df_compare = pd.read_sql(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})", engine)
             df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
             
             c1, c2, c3 = st.columns(3)
