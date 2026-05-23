@@ -12,17 +12,29 @@ import requests
 from requests.auth import HTTPBasicAuth
 import io
 import hashlib
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import NullPool # WICHTIG: Das hier importieren!
+from sqlalchemy import text
 
-@st.cache_resource
-def get_db_engine():
-    # Wir benutzen jetzt NullPool, um keine Verbindungen offen zu halten
-    return create_engine(
-        st.secrets["DB_URL"],
-        poolclass=NullPool, 
-        connect_args={"sslmode": "require"}
-    )
+# --- NEU: Streamlit Native Connection ---
+# st.connection kümmert sich automatisch um Pooling und verhindert Port-Erschöpfung
+def get_db_connection():
+    return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
+
+# --- LOGIN FUNKTION ---
+def check_login(username, password):
+    conn = get_db_connection()
+    # Streamlit connections nutzen .query() für SQL
+    # Wir müssen das Ergebnis als DataFrame abrufen
+    query_str = "SELECT password_hash, role FROM users WHERE name = :name"
+    df = conn.query(query_str, params={"name": username})
+    
+    if not df.empty:
+        stored_hash = df.iloc[0]['password_hash']
+        role = df.iloc[0]['role']
+        input_hash = hashlib.sha256(password.encode()).hexdigest()
+        
+        if input_hash == stored_hash:
+            return True, role
+    return False, None
 
 # --- LOGIN FUNKTION & LOGIK ---
 def check_login(username, password):
