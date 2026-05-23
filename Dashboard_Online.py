@@ -12,7 +12,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 import io
 import hashlib
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 # Das @st.cache_resource ist der Schlüssel! 
 # Es sorgt dafür, dass die Engine nur EINMAL erstellt wird.
