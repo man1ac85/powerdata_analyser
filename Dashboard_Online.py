@@ -13,19 +13,15 @@ from requests.auth import HTTPBasicAuth
 import io
 import hashlib
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool # WICHTIG: Das hier importieren!
 
-# Das @st.cache_resource ist der Schlüssel! 
-# Es sorgt dafür, dass die Engine nur EINMAL erstellt wird.
 @st.cache_resource
 def get_db_engine():
-    # Wir benutzen hier die Secrets und die SSL-Konfiguration
-    # Wir nutzen 'connect_args' für SSL, das ist sauberer als in der URL
+    # Wir benutzen jetzt NullPool, um keine Verbindungen offen zu halten
     return create_engine(
         st.secrets["DB_URL"],
-        pool_size=5,
-        max_overflow=0,
-        pool_pre_ping=True, # Das verhindert, dass Verbindungen "einschlafen"
-        connect_args={"sslmode": "require"} 
+        poolclass=NullPool, 
+        connect_args={"sslmode": "require"}
     )
 
 # --- LOGIN FUNKTION & LOGIK ---
