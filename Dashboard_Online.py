@@ -6,15 +6,17 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy.signal import savgol_filter
 import re
-import sqlite3
 from datetime import datetime, timedelta
 import os
 import requests
 from requests.auth import HTTPBasicAuth
 import io
-import hashlib # Neu für die Sicherheit
+import hashlib
+from sqlalchemy import create_engine, text
 
-# ... (Hier sind deine restlichen Imports) ...
+# --- DATENBANK VERBINDUNG ---
+def get_db_engine():
+    return create_engine(st.secrets["DB_URL"])
 
 # --- LOGIN FUNKTION & LOGIK ---
 def check_login(username, password):
@@ -30,12 +32,12 @@ def check_login(username, password):
             return True, role
     return False, None
 
-# Session States für Login erweitern
+# Session States für Login initialisieren
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'role' not in st.session_state: st.session_state['role'] = None
 if 'user' not in st.session_state: st.session_state['user'] = None
 
-# --- DAS LOGIN-TOR (Muss vor dem restlichen Code kommen) ---
+# --- DAS LOGIN-TOR ---
 if not st.session_state['logged_in']:
     st.title("🔒 Login erforderlich")
     user_in = st.text_input("Benutzername")
@@ -47,19 +49,16 @@ if not st.session_state['logged_in']:
             st.session_state['logged_in'] = True
             st.session_state['user'] = user_in
             st.session_state['role'] = role
-            st.rerun() # Seite neu laden
+            st.rerun()
         else:
             st.error("Benutzername oder Passwort falsch!")
-    st.stop() # Hält den Rest der App an, bis eingeloggt wurde
-# --- SESSION STATES ---
+    st.stop()
+
+# --- SESSION STATES (Rest) ---
 if 'manual_intervals' not in st.session_state: st.session_state['manual_intervals'] = []
 if 'erfassungs_modus' not in st.session_state: st.session_state['erfassungs_modus'] = "Automatisch (Algorithmus)"
 if 'overwrite_warning' not in st.session_state: st.session_state['overwrite_warning'] = False
 if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_overwrite'] = None
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_NAME = os.path.join(BASE_DIR, "training_history.db")
-USER_DB_NAME = os.path.join(BASE_DIR, "users.db")
 
 def init_system_dbs():
     conn = sqlite3.connect(DB_NAME)
