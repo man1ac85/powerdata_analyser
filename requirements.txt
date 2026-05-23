@@ -1,0 +1,9 @@
+Plaintext
+streamlit
+fitparse
+pandas
+plotly
+scipy
+requests
+sqlalchemy
+psycopg2-binary
