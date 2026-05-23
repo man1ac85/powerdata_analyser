@@ -12,7 +12,45 @@ import os
 import requests
 from requests.auth import HTTPBasicAuth
 import io
+import hashlib # Neu für die Sicherheit
 
+# ... (Hier sind deine restlichen Imports) ...
+
+# --- LOGIN FUNKTION & LOGIK ---
+def check_login(username, password):
+    engine = get_db_engine()
+    query = text("SELECT password_hash, role FROM users WHERE name = :name")
+    with engine.connect() as conn:
+        result = conn.execute(query, {"name": username}).fetchone()
+    if result:
+        stored_hash = result[0]
+        role = result[1]
+        input_hash = hashlib.sha256(password.encode()).hexdigest()
+        if input_hash == stored_hash:
+            return True, role
+    return False, None
+
+# Session States für Login erweitern
+if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
+if 'role' not in st.session_state: st.session_state['role'] = None
+if 'user' not in st.session_state: st.session_state['user'] = None
+
+# --- DAS LOGIN-TOR (Muss vor dem restlichen Code kommen) ---
+if not st.session_state['logged_in']:
+    st.title("🔒 Login erforderlich")
+    user_in = st.text_input("Benutzername")
+    pass_in = st.text_input("Passwort", type="password")
+    
+    if st.button("Anmelden"):
+        is_valid, role = check_login(user_in, pass_in)
+        if is_valid:
+            st.session_state['logged_in'] = True
+            st.session_state['user'] = user_in
+            st.session_state['role'] = role
+            st.rerun() # Seite neu laden
+        else:
+            st.error("Benutzername oder Passwort falsch!")
+    st.stop() # Hält den Rest der App an, bis eingeloggt wurde
 # --- SESSION STATES ---
 if 'manual_intervals' not in st.session_state: st.session_state['manual_intervals'] = []
 if 'erfassungs_modus' not in st.session_state: st.session_state['erfassungs_modus'] = "Automatisch (Algorithmus)"
