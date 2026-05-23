@@ -16,7 +16,12 @@ from sqlalchemy import create_engine, text
 
 # --- DATENBANK VERBINDUNG ---
 def get_db_engine():
-    return create_engine(st.secrets["DB_URL"])
+    # Wir fügen pool_size und max_overflow hinzu, um den Server nicht zu fluten
+    return create_engine(
+        st.secrets["DB_URL"],
+        pool_size=1,
+        max_overflow=0
+    )
 
 # --- LOGIN FUNKTION & LOGIK ---
 def check_login(username, password):
