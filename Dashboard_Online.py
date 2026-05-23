@@ -72,37 +72,6 @@ if 'erfassungs_modus' not in st.session_state: st.session_state['erfassungs_modu
 if 'overwrite_warning' not in st.session_state: st.session_state['overwrite_warning'] = False
 if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_overwrite'] = None
 
-def init_system_dbs():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS workouts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, date TEXT, type TEXT, structure TEXT, avg_power INTEGER, max_power INTEGER
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS intervals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, workout_id INTEGER, interval_num INTEGER, 
-            avg_power INTEGER, avg_hr INTEGER, max_hr INTEGER, duration_sec INTEGER, 
-            std_hr REAL, avg_hr_p INTEGER,
-            FOREIGN KEY (workout_id) REFERENCES workouts (id) ON DELETE CASCADE
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-    conn = sqlite3.connect(USER_DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, api_key TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-init_system_dbs()
-
 # --- DATENBANK HELFER ---
 def add_new_athlete(name, api_key):
     try:
