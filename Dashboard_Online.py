@@ -7,22 +7,19 @@ from plotly.subplots import make_subplots
 from scipy.signal import savgol_filter
 import re
 from datetime import datetime, timedelta
-import os
-import requests
-from requests.auth import HTTPBasicAuth
 import io
 import hashlib
-from sqlalchemy import text, create_engine
-from sqlalchemy.pool import NullPool
+import requests
+from requests.auth import HTTPBasicAuth
+from sqlalchemy import text
 from supabase import create_client, Client
 
 # --- DATENBANK & KONFIGURATION ---
 st.set_page_config(page_title="FIT Analyzer Pro Cloud", layout="wide")
 
 def get_db_connection():
-    # Wir nutzen NullPool, um Verbindungs-Erschöpfung in der Cloud zu vermeiden
-    # Bitte verwende in deiner DB_URL den Port 6543
-    return create_engine(st.secrets["DB_URL"], poolclass=NullPool, connect_args={"sslmode": "require"})
+    # Streamlit connection (nutzt automatisch psycopg3, wenn in requirements.txt)
+    return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
 
 @st.cache_resource
 def get_supabase_client():
@@ -69,36 +66,37 @@ if 'erfassungs_modus' not in st.session_state: st.session_state['erfassungs_modu
 if 'overwrite_warning' not in st.session_state: st.session_state['overwrite_warning'] = False
 if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_overwrite'] = None
 
-# --- DATENBANK HELFER (PostgreSQL ersetzt SQLite) ---
+# --- DATENBANK HELFER (PostgreSQL) ---
 def add_new_athlete(name, api_key):
-    engine = get_db_connection()
-    with engine.connect() as conn:
-        exists = conn.execute(text("SELECT 1 FROM users WHERE name = :name"), {"name": name.strip()}).fetchone()
-        if exists:
-            return False, "Fehler: Ein Athlet mit diesem Namen existiert bereits."
-        conn.execute(text("INSERT INTO users (name, api_key) VALUES (:name, :api_key)"), 
-                     {"name": name.strip(), "api_key": api_key.strip()})
-        conn.commit()
+    conn = get_db_connection()
+    exists = conn.query("SELECT 1 FROM users WHERE name = :name", params={"name": name.strip()})
+    if not exists.empty:
+        return False, "Fehler: Ein Athlet mit diesem Namen existiert bereits."
+    
+    with conn.session as s:
+        s.execute(text("INSERT INTO users (name, api_key) VALUES (:name, :api_key)"), 
+                  {"name": name.strip(), "api_key": api_key.strip()})
+        s.commit()
     return True, f"Athleten-Profil für '{name}' erfolgreich angelegt!"
 
 def load_all_athletes():
-    engine = get_db_connection()
-    return pd.read_sql("SELECT * FROM users", engine)
+    conn = get_db_connection()
+    return conn.query("SELECT * FROM users")
 
 def check_duplicate_workout(date, workout_type, structure):
-    engine = get_db_connection()
-    with engine.connect() as conn:
-        res = conn.execute(text("SELECT id FROM workouts WHERE date = :date AND type = :type AND structure = :structure"),
-                           {"date": date, "type": workout_type, "structure": structure}).fetchone()
-        return res[0] if res else None
+    conn = get_db_connection()
+    result = conn.query("SELECT id FROM workouts WHERE date = :date AND type = :type AND structure = :structure",
+                        params={"date": date, "type": workout_type, "structure": structure})
+    return result.iloc[0]['id'] if not result.empty else None
 
 def save_workout_to_db(metadata, interval_list, overwrite_id=None):
-    engine = get_db_connection()
-    with engine.connect() as conn:
+    conn = get_db_connection()
+    with conn.session as s:
         if overwrite_id:
-            conn.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": overwrite_id})
+            s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": overwrite_id})
         
-        res = conn.execute(text("""
+        # Workout einfügen
+        res = s.execute(text("""
             INSERT INTO workouts (filename, date, type, structure, avg_power, max_power) 
             VALUES (:filename, :date, :type, :structure, :avg_p, :max_p) RETURNING id
         """), {
@@ -108,7 +106,7 @@ def save_workout_to_db(metadata, interval_list, overwrite_id=None):
         workout_id = res.scalar()
         
         for row in interval_list:
-            conn.execute(text("""
+            s.execute(text("""
                 INSERT INTO intervals (workout_id, interval_num, avg_power, avg_hr, max_hr, duration_sec, std_hr, avg_hr_p) 
                 VALUES (:wid, :num, :ap, :ahr, :mhr, :dur, :std, :ahrp)
             """), {
@@ -116,7 +114,7 @@ def save_workout_to_db(metadata, interval_list, overwrite_id=None):
                 "ahr": row['Ø Herzfrequenz'], "mhr": row['Max Herzfrequenz'], "dur": row['Dauer_sec'], 
                 "std": row['Abweichung HF+-'], "ahrp": row['Durschnittliche HF_P (20-80)']
             })
-        conn.commit()
+        s.commit()
     return True, "Daten erfolgreich in die Datenbank übernommen."
 
 def transfer_to_manual(timestamps):
@@ -146,7 +144,6 @@ def download_original_fit_file(api_key, activity_id):
 st.title("Dashboard BETA: Cloud-Schnittstelle & Smart-Filter Cockpit")
 nav_mode = st.sidebar.radio("Navigation", ["Aktuelles Training einlesen", "Historie & Vergleich", "👤 Athleten verwalten"])
 
-# --- ATHLETEN VERWALTEN ---
 if nav_mode == "👤 Athleten verwalten":
     st.subheader("👤 Athleten-Profile verwalten")
     col_left, col_right = st.columns(2)
@@ -166,7 +163,6 @@ if nav_mode == "👤 Athleten verwalten":
         if df_all_users.empty: st.info("Noch keine Profile hinterlegt.")
         else: st.table(df_all_users[["id", "name"]])
 
-# --- TRAINING EINLESEN ---
 elif nav_mode == "Aktuelles Training einlesen":
     df_all_users = load_all_athletes()
     selected_activity_id = None
@@ -447,8 +443,8 @@ elif nav_mode == "Aktuelles Training einlesen":
 # --- HISTORIE ---
 elif nav_mode == "Historie & Vergleich":
     st.subheader("Datenbank-Historie & Vergleich")
-    engine = get_db_connection()
-    df_workouts = pd.read_sql("SELECT * FROM workouts", engine)
+    conn = get_db_connection()
+    df_workouts = conn.query("SELECT * FROM workouts")
     
     if df_workouts.empty: st.info("Datenbank leer.")
     else:
@@ -457,7 +453,7 @@ elif nav_mode == "Historie & Vergleich":
         
         search_query = st.text_input("Suche nach Dateiname/Datum:")
         if search_query:
-             df_workouts = df_workouts[df_workouts['filename'].str.contains(search_query, case=False, na=False) | df_workouts['date'].str.contains(search_query, case=False, na=False)]
+            df_workouts = df_workouts[df_workouts['filename'].str.contains(search_query, case=False, na=False) | df_workouts['date'].str.contains(search_query, case=False, na=False)]
 
         selected_ids = []
         for idx, row in df_workouts.iterrows():
@@ -467,15 +463,15 @@ elif nav_mode == "Historie & Vergleich":
                     selected_ids.append(row['id'])
             with col_del:
                 if st.button("🗑️", key=f"del_{row['id']}"):
-                    with engine.connect() as conn:
-                        conn.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": row['id']})
-                        conn.commit()
+                    with conn.session as s:
+                        s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": row['id']})
+                        s.commit()
                     st.rerun()
 
         if len(selected_ids) >= 2:
             st.markdown("---")
             ids_string = ",".join(map(str, selected_ids))
-            df_compare = pd.read_sql(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})", engine)
+            df_compare = conn.query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})")
             df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
             
             c1, c2, c3 = st.columns(3)
