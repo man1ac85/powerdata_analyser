@@ -15,7 +15,13 @@ import hashlib
 from sqlalchemy import text
 from supabase import create_client, Client
 
-# --- DATENBANK (REST API) ---
+# --- DATENBANK & KONFIGURATION ---
+st.set_page_config(page_title="FIT Analyzer Pro Cloud", layout="wide")
+
+def get_db_connection():
+    # Nutzt die Streamlit-eigene SQL-Verbindung (stabil für Supabase)
+    return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
+
 @st.cache_resource
 def get_supabase_client():
     url = st.secrets["SUPABASE_URL"]
@@ -25,24 +31,15 @@ def get_supabase_client():
 # --- LOGIN FUNKTION ---
 def check_login(username, password):
     supabase = get_supabase_client()
-    
-    # API Aufruf: Hole den User mit dem Namen
     response = supabase.table("users").select("password_hash, role").eq("name", username).execute()
-    
     if response.data:
-        # User gefunden
         user = response.data[0]
         stored_hash = user['password_hash']
         role = user['role']
-        
-        # Hash vergleichen
         input_hash = hashlib.sha256(password.encode()).hexdigest()
-        
         if input_hash == stored_hash:
             return True, role
-            
     return False, None
-
 
 # --- SESSION STATES ---
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
@@ -54,7 +51,6 @@ if not st.session_state['logged_in']:
     st.title("🔒 Login erforderlich")
     user_in = st.text_input("Benutzername")
     pass_in = st.text_input("Passwort", type="password")
-    
     if st.button("Anmelden"):
         is_valid, role = check_login(user_in, pass_in)
         if is_valid:
@@ -62,9 +58,8 @@ if not st.session_state['logged_in']:
             st.session_state['user'] = user_in
             st.session_state['role'] = role
             st.rerun()
-        else:
-            st.error("Benutzername oder Passwort falsch!")
-    st.stop() # Hält den Rest der App an
+        else: st.error("Benutzername oder Passwort falsch!")
+    st.stop()
 
 # --- SESSION STATES (Rest) ---
 if 'manual_intervals' not in st.session_state: st.session_state['manual_intervals'] = []
@@ -72,63 +67,55 @@ if 'erfassungs_modus' not in st.session_state: st.session_state['erfassungs_modu
 if 'overwrite_warning' not in st.session_state: st.session_state['overwrite_warning'] = False
 if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_overwrite'] = None
 
-# --- DATENBANK HELFER ---
+# --- DATENBANK HELFER (PostgreSQL ersetzt SQLite) ---
 def add_new_athlete(name, api_key):
-    try:
-        conn = st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
-# Für Schreib-Operationen (INSERT, UPDATE) nutzt du statt .query() den Befehl .session:
-with conn.session as s:
-    s.execute(text("INSERT INTO ..."))
-    s.commit()
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO users (name, api_key) VALUES (?, ?)", (name.strip(), api_key.strip()))
-        conn.commit()
-        conn.close()
-        return True, f"Athleten-Profil für '{name}' erfolgreich angelegt!"
-    except sqlite3.IntegrityError:
+    conn = get_db_connection()
+    exists = conn.query("SELECT 1 FROM users WHERE name = :name", params={"name": name.strip()})
+    if not exists.empty:
         return False, "Fehler: Ein Athlet mit diesem Namen existiert bereits."
+    with conn.session as s:
+        s.execute(text("INSERT INTO users (name, api_key) VALUES (:name, :api_key)"), 
+                  {"name": name.strip(), "api_key": api_key.strip()})
+        s.commit()
+    return True, f"Athleten-Profil für '{name}' erfolgreich angelegt!"
 
 def load_all_athletes():
-    # Wir nutzen die bestehende st.connection aus deinem Code
-    conn = st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
-    
-    # st.connection erlaubt es, direkt SQL abzufeuern und als DataFrame zu bekommen
-    df_u = conn.query("SELECT * FROM users")
-    return df_u
+    conn = get_db_connection()
+    return conn.query("SELECT * FROM users")
 
 def check_duplicate_workout(date, workout_type, structure):
-    conn = st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
-# Für Schreib-Operationen (INSERT, UPDATE) nutzt du statt .query() den Befehl .session:
-with conn.session as s:
-    s.execute(text("INSERT INTO ..."))
-    s.commit()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM workouts WHERE date = ? AND type = ? AND structure = ?", (date, workout_type, structure))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
+    conn = get_db_connection()
+    result = conn.query("SELECT id FROM workouts WHERE date = :date AND type = :type AND structure = :structure",
+                        params={"date": date, "type": workout_type, "structure": structure})
+    return result.iloc[0]['id'] if not result.empty else None
 
 def save_workout_to_db(metadata, interval_list, overwrite_id=None):
-    conn = st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
-# Für Schreib-Operationen (INSERT, UPDATE) nutzt du statt .query() den Befehl .session:
-with conn.session as s:
-    s.execute(text("INSERT INTO ..."))
-    s.commit()
-    cursor = conn.cursor()
-    if overwrite_id: cursor.execute("DELETE FROM workouts WHERE id = ?", (overwrite_id,))
-    
-    cursor.execute("""
-        INSERT INTO workouts (filename, date, type, structure, avg_power, max_power) VALUES (?, ?, ?, ?, ?, ?)
-    """, (metadata['filename'], metadata['date'], metadata['type'], metadata['structure'], metadata['avg_power'], metadata['max_power']))
-    
-    workout_id = cursor.lastrowid
-    for row in interval_list:
-        cursor.execute("""
-            INSERT INTO intervals (workout_id, interval_num, avg_power, avg_hr, max_hr, duration_sec, std_hr, avg_hr_p) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (workout_id, row['Intervall'], row['Ø Leistung'], row['Ø Herzfrequenz'], row['Max Herzfrequenz'], row['Dauer_sec'], row['Abweichung HF+-'], row['Durschnittliche HF_P (20-80)']))
-    conn.commit()
-    conn.close()
+    conn = get_db_connection()
+    with conn.session as s:
+        if overwrite_id:
+            s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": overwrite_id})
+        
+        # Workout einfügen
+        res = s.execute(text("""
+            INSERT INTO workouts (filename, date, type, structure, avg_power, max_power) 
+            VALUES (:filename, :date, :type, :structure, :avg_p, :max_p) RETURNING id
+        """), {
+            "filename": metadata['filename'], "date": metadata['date'], "type": metadata['type'], 
+            "structure": metadata['structure'], "avg_p": metadata['avg_power'], "max_p": metadata['max_power']
+        })
+        workout_id = res.scalar()
+        
+        # Intervalle einfügen
+        for row in interval_list:
+            s.execute(text("""
+                INSERT INTO intervals (workout_id, interval_num, avg_power, avg_hr, max_hr, duration_sec, std_hr, avg_hr_p) 
+                VALUES (:wid, :num, :ap, :ahr, :mhr, :dur, :std, :ahrp)
+            """), {
+                "wid": workout_id, "num": row['Intervall'], "ap": row['Ø Leistung'], 
+                "ahr": row['Ø Herzfrequenz'], "mhr": row['Max Herzfrequenz'], "dur": row['Dauer_sec'], 
+                "std": row['Abweichung HF+-'], "ahrp": row['Durschnittliche HF_P (20-80)']
+            })
+        s.commit()
     return True, "Daten erfolgreich in die Datenbank übernommen."
 
 def transfer_to_manual(timestamps):
@@ -155,11 +142,10 @@ def download_original_fit_file(api_key, activity_id):
     except Exception as e: return None, str(e)
 
 # --- SURFACE LAYOUT ---
-st.set_page_config(page_title="FIT Analyzer Pro Cloud", layout="wide")
 st.title("Dashboard BETA: Cloud-Schnittstelle & Smart-Filter Cockpit")
-
 nav_mode = st.sidebar.radio("Navigation", ["Aktuelles Training einlesen", "Historie & Vergleich", "👤 Athleten verwalten"])
 
+# --- ATHLETEN VERWALTEN ---
 if nav_mode == "👤 Athleten verwalten":
     st.subheader("👤 Athleten-Profile verwalten")
     col_left, col_right = st.columns(2)
@@ -179,6 +165,7 @@ if nav_mode == "👤 Athleten verwalten":
         if df_all_users.empty: st.info("Noch keine Profile hinterlegt.")
         else: st.table(df_all_users[["id", "name"]])
 
+# --- TRAINING EINLESEN ---
 elif nav_mode == "Aktuelles Training einlesen":
     df_all_users = load_all_athletes()
     selected_activity_id = None
@@ -458,78 +445,43 @@ elif nav_mode == "Aktuelles Training einlesen":
 
 elif nav_mode == "Historie & Vergleich":
     st.subheader("Datenbank-Historie & Vergleich")
+    conn = get_db_connection()
+    df_workouts = conn.query("SELECT * FROM workouts")
     
-    # --- FILTERN ---
-    conn = st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
-# Für Schreib-Operationen (INSERT, UPDATE) nutzt du statt .query() den Befehl .session:
-with conn.session as s:
-    s.execute(text("INSERT INTO ..."))
-    s.commit()
-    df_workouts = pd.read_sql_query("SELECT * FROM workouts", conn)
-    conn.close()
-    
-    if df_workouts.empty: 
-        st.info("Datenbank leer.")
+    if df_workouts.empty: st.info("Datenbank leer.")
     else:
-        # Filter-Optionen
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"])
-        with col_f2:
-            search_query = st.text_input("Suche nach Dateiname/Datum:")
-
-        # Filtern des DataFrames
-        df_display = df_workouts.copy()
-        if filter_type != "ALLE":
-            df_display = df_display[df_display['type'] == filter_type]
-        if search_query:
-            df_display = df_display[df_display['filename'].str.contains(search_query, case=False, na=False) | 
-                                    df_display['date'].str.contains(search_query, case=False, na=False)]
-
-        # --- ANZEIGE & LÖSCHEN ---
-        st.write("---")
+        filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"])
+        if filter_type != "ALLE": df_workouts = df_workouts[df_workouts['type'] == filter_type]
+        
         selected_ids = []
-        for idx, row in df_display.iterrows():
+        for idx, row in df_workouts.iterrows():
             col_check, col_del = st.columns([0.85, 0.15])
             with col_check:
                 if st.checkbox(f"{row['date']} | {row['type']} ({row['structure']}) | {row['filename']}", key=f"wb_{row['id']}"):
                     selected_ids.append(row['id'])
             with col_del:
                 if st.button("🗑️", key=f"del_{row['id']}"):
-                    conn = sqlite3.connect(DB_NAME)
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM workouts WHERE id = ?", (row['id'],))
-                    conn.commit()
-                    conn.close()
+                    with conn.session as s:
+                        s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": row['id']})
+                        s.commit()
                     st.rerun()
 
         # --- VERGLEICH ---
         if len(selected_ids) >= 2:
             st.markdown("---")
-            conn = sqlite3.connect(DB_NAME)
             ids_string = ",".join(map(str, selected_ids))
-            df_compare = pd.read_sql_query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})", conn)
-            conn.close()
+            df_compare = conn.query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})")
             df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
             
             c1, c2, c3 = st.columns(3)
-            
-            # 1. Ø Watt
             with c1: st.plotly_chart(px.scatter(df_compare, x="interval_num", y="avg_power", color="Workout", title="Ø Watt").update_traces(mode='lines+markers').update_layout(template="plotly_dark"))
-            
-            # 2. Ø HF mit Standardabweichung und 20-80 Perzentil
             with c2:
                 fig_hr = go.Figure()
                 for w in df_compare['Workout'].unique():
                     sub = df_compare[df_compare['Workout'] == w]
-                    fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr'], name=f"{w} (Ø)", 
-                                                error_y=dict(type='data', array=sub['std_hr'], visible=True),
-                                                mode='lines+markers'))
-                    fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr_p'], name=f"{w} (20-80%)",
-                                                mode='markers', marker=dict(size=8, color=None, line=dict(color='orange', width=2))))
-                fig_hr.update_layout(title="Ø Herzfrequenz (+- StdDev)", template="plotly_dark")
+                    fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr'], name=f"{w} (Ø)", mode='lines+markers'))
+                    fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr_p'], name=f"{w} (20-80%)", mode='markers'))
+                fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark")
                 st.plotly_chart(fig_hr)
-
-            # 3. Max HF (Revert auf einfache px.scatter Darstellung)
             with c3: 
                 st.plotly_chart(px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF").update_traces(mode='lines+markers').update_layout(template="plotly_dark"))
