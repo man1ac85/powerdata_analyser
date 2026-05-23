@@ -68,17 +68,17 @@ if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_
 
 # --- DATENBANK HELFER (PostgreSQL) ---
 def add_new_athlete(name, api_key):
-    engine = get_db_connection()
-    with engine.connect() as conn:
-        # 1. Prüfen, ob der Name schon existiert (das ist okay so)
-        exists = conn.execute(text("SELECT 1 FROM users WHERE name = :name"), {"name": name.strip()}).fetchone()
-        if exists:
-            return False, "Fehler: Ein Athlet mit diesem Namen existiert bereits."
-        
-        # 2. INSERT ohne die Spalte 'id' - die Datenbank macht das automatisch!
-        conn.execute(text("INSERT INTO users (name, api_key) VALUES (:name, :api_key)"), 
-                     {"name": name.strip(), "api_key": api_key.strip()})
-        conn.commit()
+    conn = get_db_connection()
+    # Prüfen, ob Name existiert
+    exists = conn.query("SELECT 1 FROM users WHERE name = :name", params={"name": name.strip()})
+    if not exists.empty:
+        return False, "Fehler: Ein Athlet mit diesem Namen existiert bereits."
+    
+    # INSERT ohne Angabe der 'id' Spalte
+    with conn.session as s:
+        s.execute(text("INSERT INTO users (name, api_key) VALUES (:name, :api_key)"), 
+                  {"name": name.strip(), "api_key": api_key.strip()})
+        s.commit()
     return True, f"Athleten-Profil für '{name}' erfolgreich angelegt!"
 
 def load_all_athletes():
@@ -149,21 +149,35 @@ nav_mode = st.sidebar.radio("Navigation", ["Aktuelles Training einlesen", "Histo
 if nav_mode == "👤 Athleten verwalten":
     st.subheader("👤 Athleten-Profile verwalten")
     col_left, col_right = st.columns(2)
+    
     with col_left:
         st.markdown("### ➕ Neues Athleten-Profil anlegen")
-        name_in = st.text_input("Name des Sportlers (z.B. Max):")
-        key_in = st.text_input("Intervals.icu API Key:", type="password")
-        if st.button("Profil dauerhaft speichern"):
-            if name_in and key_in:
-                success, message = add_new_athlete(name_in, key_in)
-                if success: st.success(message)
-                else: st.error(message)
-                st.rerun()
+        
+        # Ein 'form' Container stellt sicher, dass alle Eingaben gleichzeitig verarbeitet werden
+        with st.form("new_athlete_form", clear_on_submit=True):
+            name_in = st.text_input("Name des Sportlers (z.B. Max):")
+            key_in = st.text_input("Intervals.icu API Key:", type="password")
+            submitted = st.form_submit_button("Profil dauerhaft speichern")
+            
+            if submitted:
+                if name_in and key_in:
+                    # Der Aufruf erfolgt hier innerhalb des Submit-Blocks
+                    success, message = add_new_athlete(name_in, key_in)
+                    if success:
+                        st.success(message)
+                    else:
+                        st.error(message)
+                else:
+                    st.warning("Bitte sowohl Name als auch API-Key ausfüllen.")
+                    
     with col_right:
         st.markdown("### 👥 Vorhandene Profile")
         df_all_users = load_all_athletes()
-        if df_all_users.empty: st.info("Noch keine Profile hinterlegt.")
-        else: st.table(df_all_users[["id", "name"]])
+        if df_all_users.empty: 
+            st.info("Noch keine Profile hinterlegt.")
+        else: 
+            # Zeige nur die relevanten Spalten an
+            st.table(df_all_users[["id", "name"]])
 
 elif nav_mode == "Aktuelles Training einlesen":
     df_all_users = load_all_athletes()
