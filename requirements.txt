@@ -6,3 +6,4 @@ scipy
 requests
 sqlalchemy
 psycopg2-binary
+supabase
