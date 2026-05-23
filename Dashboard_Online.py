@@ -68,15 +68,17 @@ if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_
 
 # --- DATENBANK HELFER (PostgreSQL) ---
 def add_new_athlete(name, api_key):
-    conn = get_db_connection()
-    exists = conn.query("SELECT 1 FROM users WHERE name = :name", params={"name": name.strip()})
-    if not exists.empty:
-        return False, "Fehler: Ein Athlet mit diesem Namen existiert bereits."
-    
-    with conn.session as s:
-        s.execute(text("INSERT INTO users (name, api_key) VALUES (:name, :api_key)"), 
-                  {"name": name.strip(), "api_key": api_key.strip()})
-        s.commit()
+    engine = get_db_connection()
+    with engine.connect() as conn:
+        # 1. Prüfen, ob der Name schon existiert (das ist okay so)
+        exists = conn.execute(text("SELECT 1 FROM users WHERE name = :name"), {"name": name.strip()}).fetchone()
+        if exists:
+            return False, "Fehler: Ein Athlet mit diesem Namen existiert bereits."
+        
+        # 2. INSERT ohne die Spalte 'id' - die Datenbank macht das automatisch!
+        conn.execute(text("INSERT INTO users (name, api_key) VALUES (:name, :api_key)"), 
+                     {"name": name.strip(), "api_key": api_key.strip()})
+        conn.commit()
     return True, f"Athleten-Profil für '{name}' erfolgreich angelegt!"
 
 def load_all_athletes():
