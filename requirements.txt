@@ -5,5 +5,5 @@ plotly
 scipy
 requests
 sqlalchemy
-psycopg[binary]
 supabase
+psycopg2-binary
