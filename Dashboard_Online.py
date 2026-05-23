@@ -75,7 +75,11 @@ if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_
 # --- DATENBANK HELFER ---
 def add_new_athlete(name, api_key):
     try:
-        conn = sqlite3.connect(USER_DB_NAME)
+        conn = st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
+# Für Schreib-Operationen (INSERT, UPDATE) nutzt du statt .query() den Befehl .session:
+with conn.session as s:
+    s.execute(text("INSERT INTO ..."))
+    s.commit()
         cursor = conn.cursor()
         cursor.execute("INSERT INTO users (name, api_key) VALUES (?, ?)", (name.strip(), api_key.strip()))
         conn.commit()
@@ -85,13 +89,19 @@ def add_new_athlete(name, api_key):
         return False, "Fehler: Ein Athlet mit diesem Namen existiert bereits."
 
 def load_all_athletes():
-    conn = sqlite3.connect(USER_DB_NAME)
-    df_u = pd.read_sql_query("SELECT * FROM users", conn)
-    conn.close()
+    # Wir nutzen die bestehende st.connection aus deinem Code
+    conn = st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
+    
+    # st.connection erlaubt es, direkt SQL abzufeuern und als DataFrame zu bekommen
+    df_u = conn.query("SELECT * FROM users")
     return df_u
 
 def check_duplicate_workout(date, workout_type, structure):
-    conn = sqlite3.connect(DB_NAME)
+    conn = st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
+# Für Schreib-Operationen (INSERT, UPDATE) nutzt du statt .query() den Befehl .session:
+with conn.session as s:
+    s.execute(text("INSERT INTO ..."))
+    s.commit()
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM workouts WHERE date = ? AND type = ? AND structure = ?", (date, workout_type, structure))
     result = cursor.fetchone()
@@ -99,7 +109,11 @@ def check_duplicate_workout(date, workout_type, structure):
     return result[0] if result else None
 
 def save_workout_to_db(metadata, interval_list, overwrite_id=None):
-    conn = sqlite3.connect(DB_NAME)
+    conn = st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
+# Für Schreib-Operationen (INSERT, UPDATE) nutzt du statt .query() den Befehl .session:
+with conn.session as s:
+    s.execute(text("INSERT INTO ..."))
+    s.commit()
     cursor = conn.cursor()
     if overwrite_id: cursor.execute("DELETE FROM workouts WHERE id = ?", (overwrite_id,))
     
@@ -446,7 +460,11 @@ elif nav_mode == "Historie & Vergleich":
     st.subheader("Datenbank-Historie & Vergleich")
     
     # --- FILTERN ---
-    conn = sqlite3.connect(DB_NAME)
+    conn = st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
+# Für Schreib-Operationen (INSERT, UPDATE) nutzt du statt .query() den Befehl .session:
+with conn.session as s:
+    s.execute(text("INSERT INTO ..."))
+    s.commit()
     df_workouts = pd.read_sql_query("SELECT * FROM workouts", conn)
     conn.close()
     
