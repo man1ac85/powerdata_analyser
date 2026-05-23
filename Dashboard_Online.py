@@ -13,30 +13,36 @@ from requests.auth import HTTPBasicAuth
 import io
 import hashlib
 from sqlalchemy import text
-# --- DATENBANK VERBINDUNG (Neu & Stabil) ---
-def get_db_connection():
-    # 'st.connection' ist der moderne Streamlit-Weg, der automatisch 
-    # das Pooling übernimmt und Port-Erschöpfung verhindert.
-    return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
+from supabase import create_client, Client
+
+# --- DATENBANK (REST API) ---
+@st.cache_resource
+def get_supabase_client():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
 
 # --- LOGIN FUNKTION ---
 def check_login(username, password):
-    conn = get_db_connection() # Hier rufen wir jetzt die NEUE Funktion auf
+    supabase = get_supabase_client()
     
-    # SQL-Abfrage ausführen
-    query_str = "SELECT password_hash, role FROM users WHERE name = :name"
-    df = conn.query(query_str, params={"name": username})
+    # API Aufruf: Hole den User mit dem Namen
+    response = supabase.table("users").select("password_hash, role").eq("name", username).execute()
     
-    if not df.empty:
-        stored_hash = df.iloc[0]['password_hash']
-        role = df.iloc[0]['role']
+    if response.data:
+        # User gefunden
+        user = response.data[0]
+        stored_hash = user['password_hash']
+        role = user['role']
         
         # Hash vergleichen
         input_hash = hashlib.sha256(password.encode()).hexdigest()
         
         if input_hash == stored_hash:
             return True, role
+            
     return False, None
+
 
 # --- SESSION STATES ---
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
