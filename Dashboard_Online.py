@@ -521,7 +521,7 @@ elif nav_mode == "Daten & Auswertung":
         st.error(f"Fehler beim Laden: {e}")
     # Athleten-Auswahl (Rollenbasiert)
     authorized_athletes = get_authorized_athletes(st.session_state['user'], st.session_state['role'])
-    selected_name = st.selectbox("Athlet wählen:", authorized_athletes["name"])
+    selected_name = st.selectbox("Athlet wählen:", authorized_athletes["name"], key="athlete_selector")
     athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
     
     # Athleten-Profil Steckbrief
