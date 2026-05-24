@@ -566,14 +566,14 @@ elif nav_mode == "Daten & Auswertung":
                 df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
                 
                 c1, c2, c3 = st.columns(3)
-                with c1: st.plotly_chart(px.scatter(df_compare, x="interval_num", y="avg_power", color="Workout", title="Ø Watt").update_traces(mode='lines+markers').update_layout(template="plotly_dark", width='stretch'))
+                with c1: st.plotly_chart(px.scatter(..., title="Max HF").update_layout(template="plotly_dark"), width='stretch')
                 with c2:
                     fig_hr = go.Figure()
                     for w in df_compare['Workout'].unique():
                         sub = df_compare[df_compare['Workout'] == w]
                         fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr'], name=f"{w} (Ø)", mode='lines+markers'))
                         fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr_p'], name=f"{w} (20-80%)", mode='markers'))
-                    fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark", width='stretch')
+                    fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark")st.plotly_chart(fig_hr, width='stretch')
                     st.plotly_chart(fig_hr)
                 with c3: 
                     st.plotly_chart(px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF").update_traces(mode='lines+markers').update_layout(template="plotly_dark", width='stretch'))
