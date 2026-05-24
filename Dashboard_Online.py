@@ -503,23 +503,18 @@ elif nav_mode == "Aktuelles Training einlesen":
                             if st.button(f"Löschen Intervall {idx+1}", key=f"del_{idx}"):
                                 st.session_state['manual_intervals'].pop(idx); st.rerun()
         except Exception as e: st.error(f"Fehler bei der Analyse: {e}")
-
+            
 elif nav_mode == "Daten & Auswertung":
     st.subheader("📊 Daten & Auswertung")
     
-    # 1. Athleten laden
     authorized_athletes = get_authorized_athletes(st.session_state['user'], st.session_state['role'])
     
     if authorized_athletes.empty:
         st.warning("Keine Athleten gefunden.")
     else:
-        # 2. Einzige Selectbox mit eindeutigem Key
         selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="unique_athlete_selector")
-        
-        # Athleten-Daten extrahieren
         athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
         
-        # 3. Profil-Steckbrief
         with st.expander("👤 Athleten-Profil", expanded=True):
             stats = get_athlete_stats_from_intervals(athlete_row['api_key'])
             if stats:
@@ -530,9 +525,7 @@ elif nav_mode == "Daten & Auswertung":
             else:
                 st.error("Konnte Daten nicht laden.")
 
-        # 4. Workouts laden (mit Typ-Cast für die ID)
         conn = get_db_connection()
-        # WICHTIG: Hier casten wir die ID explizit zu int, um den DatabaseError zu vermeiden
         uid_val = int(athlete_row['id'])
         df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": uid_val})
         
@@ -563,18 +556,24 @@ elif nav_mode == "Daten & Auswertung":
                 st.markdown("---")
                 ids_string = ",".join(map(str, selected_ids))
                 df_compare = conn.query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})")
-                df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
                 
-                c1, c2, c3 = st.columns(3)
-                with c1: st.plotly_chart(px.scatter(..., title="Max HF").update_layout(template="plotly_dark"), width='stretch')
-                with c2:
-                    fig_hr = go.Figure()
-                    for w in df_compare['Workout'].unique():
-                        sub = df_compare[df_compare['Workout'] == w]
-                        fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr'], name=f"{w} (Ø)", mode='lines+markers'))
-                        fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr_p'], name=f"{w} (20-80%)", mode='markers'))
-                    fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark")
-                    st.plotly_chart(fig_hr, width='stretch')
-                    st.plotly_chart(fig_hr)
-                with c3: 
-                    st.plotly_chart(px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF").update_traces(mode='lines+markers').update_layout(template="plotly_dark", width='stretch'))
+                if not df_compare.empty:
+                    df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
+                    
+                    c1, c2, c3 = st.columns(3)
+                    with c1: 
+                        fig1 = px.scatter(df_compare, x="interval_num", y="avg_power", color="Workout", title="Ø Watt")
+                        fig1.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
+                        st.plotly_chart(fig1, width='stretch')
+                    with c2:
+                        fig_hr = go.Figure()
+                        for w in df_compare['Workout'].unique():
+                            sub = df_compare[df_compare['Workout'] == w]
+                            fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr'], name=f"{w} (Ø)", mode='lines+markers'))
+                            fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr_p'], name=f"{w} (20-80%)", mode='markers'))
+                        fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark")
+                        st.plotly_chart(fig_hr, width='stretch')
+                    with c3: 
+                        fig3 = px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF")
+                        fig3.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
+                        st.plotly_chart(fig3, width='stretch')
