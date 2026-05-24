@@ -130,15 +130,20 @@ def save_workout_to_db(metadata, interval_list, overwrite_id=None):
             "structure": metadata['structure'], "avg_p": metadata['avg_power'], "max_p": metadata['max_power']
         })
         workout_id = res.scalar()
-        
         for row in interval_list:
+            # Konvertiere jeden Wert sicher in einen Python-Typ (float oder int)
             s.execute(text("""
                 INSERT INTO intervals (workout_id, interval_num, avg_power, avg_hr, max_hr, duration_sec, std_hr, avg_hr_p) 
                 VALUES (:wid, :num, :ap, :ahr, :mhr, :dur, :std, :ahrp)
             """), {
-                "wid": workout_id, "num": row['Intervall'], "ap": row['Ø Leistung'], 
-                "ahr": row['Ø Herzfrequenz'], "mhr": row['Max Herzfrequenz'], "dur": row['Dauer_sec'], 
-                "std": row['Abweichung HF+-'], "ahrp": row['Durschnittliche HF_P (20-80)']
+                "wid": int(workout_id),
+                "num": int(row['Intervall']),
+                "ap": float(row['Ø Leistung']),
+                "ahr": float(row['Ø Herzfrequenz']),
+                "mhr": float(row['Max Herzfrequenz']),
+                "dur": int(row['Dauer_sec']),
+                "std": float(row['Abweichung HF+-']),  # Hier wird np.float64 zu einem sauberen float
+                "ahrp": float(row['Durschnittliche HF_P (20-80)'])
             })
         s.commit()
     return True, "Daten erfolgreich in die Datenbank übernommen."
