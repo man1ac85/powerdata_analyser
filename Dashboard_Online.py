@@ -67,19 +67,22 @@ if 'overwrite_warning' not in st.session_state: st.session_state['overwrite_warn
 if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_overwrite'] = None
 
 # --- DATENBANK HELFER (PostgreSQL) ---
-def add_new_athlete(name, api_key):
+def add_new_athlete(name, api_key, password):
+    # Passwort hashen
+    pwd_hash = hashlib.sha256(password.encode()).hexdigest()
     conn = get_db_connection()
+    
     # Prüfen, ob Name existiert
     exists = conn.query("SELECT 1 FROM users WHERE name = :name", params={"name": name.strip()})
     if not exists.empty:
-        return False, "Fehler: Ein Athlet mit diesem Namen existiert bereits."
+        return False, "Athlet existiert bereits."
     
-    # INSERT ohne Angabe der 'id' Spalte
+    # INSERT ohne 'id'
     with conn.session as s:
-        s.execute(text("INSERT INTO users (name, api_key) VALUES (:name, :api_key)"), 
-                  {"name": name.strip(), "api_key": api_key.strip()})
+        s.execute(text("INSERT INTO users (name, api_key, password_hash, role) VALUES (:name, :api_key, :pwd, 'user')"), 
+                  {"name": name.strip(), "api_key": api_key.strip(), "pwd": pwd_hash})
         s.commit()
-    return True, f"Athleten-Profil für '{name}' erfolgreich angelegt!"
+    return True, f"Athlet '{name}' angelegt!"
 
 def load_all_athletes():
     conn = get_db_connection()
@@ -150,34 +153,37 @@ if nav_mode == "👤 Athleten verwalten":
     st.subheader("👤 Athleten-Profile verwalten")
     col_left, col_right = st.columns(2)
     
+    if st.session_state.get('user') == "Bastian": 
+    st.subheader("🛠️ Admin: Athleten verwalten")
+    col_left, col_right = st.columns(2)
+    
     with col_left:
-        st.markdown("### ➕ Neues Athleten-Profil anlegen")
-        
-        # Ein 'form' Container stellt sicher, dass alle Eingaben gleichzeitig verarbeitet werden
+        st.markdown("### ➕ Athlet anlegen")
         with st.form("new_athlete_form", clear_on_submit=True):
-            name_in = st.text_input("Name des Sportlers (z.B. Max):")
-            key_in = st.text_input("Intervals.icu API Key:", type="password")
-            submitted = st.form_submit_button("Profil dauerhaft speichern")
-            
+            name_in = st.text_input("Name:")
+            key_in = st.text_input("API Key:", type="password")
+            pwd_in = st.text_input("Passwort:", type="password")
+            submitted = st.form_submit_button("Speichern")
             if submitted:
-                if name_in and key_in:
-                    # Der Aufruf erfolgt hier innerhalb des Submit-Blocks
-                    success, message = add_new_athlete(name_in, key_in)
-                    if success:
-                        st.success(message)
-                    else:
-                        st.error(message)
-                else:
-                    st.warning("Bitte sowohl Name als auch API-Key ausfüllen.")
-                    
+                if name_in and key_in and pwd_in:
+                    success, message = add_new_athlete(name_in, key_in, pwd_in)
+                    if success: st.success(message)
+                    else: st.error(message)
+    
     with col_right:
-        st.markdown("### 👥 Vorhandene Profile")
-        df_all_users = load_all_athletes()
-        if df_all_users.empty: 
-            st.info("Noch keine Profile hinterlegt.")
-        else: 
-            # Zeige nur die relevanten Spalten an
-            st.table(df_all_users[["id", "name"]])
+        st.markdown("### 🗑️ Athlet löschen")
+        df_all = load_all_athletes()
+        if not df_all.empty:
+            del_name = st.selectbox("Wähle Athlet:", df_all["name"])
+            if st.button("Löschen"):
+                conn = get_db_connection()
+                with conn.session as s:
+                    s.execute(text("DELETE FROM users WHERE name = :name"), {"name": del_name})
+                    s.commit()
+                st.success(f"{del_name} gelöscht")
+                st.rerun()
+    else:
+        st.info("Bereich nur für Admin sichtbar.")
 
 elif nav_mode == "Aktuelles Training einlesen":
     df_all_users = load_all_athletes()
