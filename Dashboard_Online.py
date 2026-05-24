@@ -16,7 +16,20 @@ from supabase import create_client, Client
 
 # --- DATENBANK & KONFIGURATION ---
 st.set_page_config(page_title="FIT Analyzer Pro Cloud", layout="wide")
-
+def get_athlete_stats_from_intervals(api_key):
+    # Abfrage der Stammdaten
+    url = "https://intervals.icu/api/v1/athlete/me/profile"
+    response = requests.get(url, auth=HTTPBasicAuth('API_KEY', api_key))
+    
+    if response.status_code == 200:
+        data = response.json().get('athlete', {})
+        # Wir geben ein schönes Dictionary zurück
+        return {
+            "Name": data.get('name'),
+            "Geschlecht": "Weiblich" if data.get('sex') == 'F' else "Männlich",
+            "Ort": f"{data.get('city')}, {data.get('country')}"
+        }
+    return None
 def get_db_connection():
     # Streamlit connection (nutzt automatisch psycopg3, wenn in requirements.txt)
     return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
@@ -84,9 +97,14 @@ def add_new_athlete(name, api_key, password):
         s.commit()
     return True, f"Athlet '{name}' angelegt!"
 
-def load_all_athletes():
+def get_authorized_athletes(current_user_name, role):
     conn = get_db_connection()
-    return conn.query("SELECT * FROM users")
+    if role == 'admin':
+        return conn.query("SELECT * FROM users")
+    elif role == 'trainer':
+        return conn.query("SELECT * FROM users WHERE trainer_id = :id", params={"id": current_user_id})
+    else: # Standard-User
+        return conn.query("SELECT * FROM users WHERE name = :name", params={"name": current_user_name})
 
 def check_duplicate_workout(date, workout_type, structure):
     conn = get_db_connection()
@@ -471,13 +489,31 @@ elif nav_mode == "Aktuelles Training einlesen":
                                 st.session_state['manual_intervals'].pop(idx); st.rerun()
         except Exception as e: st.error(f"Fehler bei der Analyse: {e}")
 
-# --- HISTORIE ---
-elif nav_mode == "Historie & Vergleich":
-    st.subheader("Datenbank-Historie & Vergleich")
-    conn = get_db_connection()
-    df_workouts = conn.query("SELECT * FROM workouts")
+elif nav_mode == "Trainingsdaten & Auswertung":
+    st.subheader("📊 Trainingsdaten & Auswertung")
     
-    if df_workouts.empty: st.info("Datenbank leer.")
+    # Athleten-Auswahl (Rollenbasiert)
+    authorized_athletes = get_authorized_athletes(st.session_state['user'], st.session_state['role'])
+    selected_name = st.selectbox("Athlet wählen:", authorized_athletes["name"])
+    athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
+    
+    # Athleten-Profil Steckbrief
+    with st.expander("👤 Athleten-Profil", expanded=True):
+        stats = get_athlete_stats_from_intervals(athlete_row['api_key'])
+        if stats:
+            cols = st.columns(3)
+            cols[0].metric("Name", stats['Name'])
+            cols[1].metric("Geschlecht", stats['Geschlecht'])
+            cols[2].metric("Ort", stats['Ort'])
+        else:
+            st.error("Konnte Daten nicht laden.")
+
+    # Datenbank-Abfrage gefiltert nach der gewählten user_id
+    conn = get_db_connection()
+    df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": athlete_row['id']})
+    
+    if df_workouts.empty: 
+        st.info(f"Keine Trainingsdaten für {selected_name} gefunden.")
     else:
         filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"])
         if filter_type != "ALLE": df_workouts = df_workouts[df_workouts['type'] == filter_type]
