@@ -105,7 +105,10 @@ def get_authorized_athletes(current_user_name, role):
         return conn.query("SELECT * FROM users WHERE trainer_id = :id", params={"id": current_user_id})
     else: # Standard-User
         return conn.query("SELECT * FROM users WHERE name = :name", params={"name": current_user_name})
-
+def load_all_athletes():
+    conn = get_db_connection()
+    # Wir nehmen alle User aus der Tabelle, um sie in der Liste anzuzeigen
+    return conn.query("SELECT * FROM users")
 def check_duplicate_workout(date, workout_type, structure):
     conn = get_db_connection()
     result = conn.query("SELECT id FROM workouts WHERE date = :date AND type = :type AND structure = :structure",
