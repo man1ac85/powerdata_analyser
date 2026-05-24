@@ -147,6 +147,13 @@ def download_original_fit_file(api_key, activity_id):
 
 # --- SURFACE LAYOUT ---
 st.title("Dashboard BETA: Cloud-Schnittstelle & Smart-Filter Cockpit")
+# LOGOUT
+if st.session_state.get('logged_in'):
+    if st.sidebar.button("🚪 Ausloggen"):
+        st.session_state['logged_in'] = False
+        st.session_state['user'] = None
+        st.session_state['role'] = None
+        st.rerun()
 nav_mode = st.sidebar.radio("Navigation", ["Aktuelles Training einlesen", "Historie & Vergleich", "👤 Athleten verwalten"])
 
 # --- ADMIN-CHECK ---
