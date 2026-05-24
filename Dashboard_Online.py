@@ -99,12 +99,19 @@ def add_new_athlete(name, api_key, password):
 
 def get_authorized_athletes(current_user_name, role):
     conn = get_db_connection()
-    if role == 'admin':
-        return conn.query("SELECT * FROM users")
-    elif role == 'trainer':
-        return conn.query("SELECT * FROM users WHERE trainer_id = :id", params={"id": current_user_id})
-    else: # Standard-User
-        return conn.query("SELECT * FROM users WHERE name = :name", params={"name": current_user_name})
+    try:
+        if role == 'admin':
+            return conn.query("SELECT * FROM users")
+        elif role == 'trainer':
+            return conn.query("SELECT * FROM users WHERE trainer_id = :tid", 
+                              params={"tid": st.session_state.get('user_id')})
+        else:
+            return conn.query("SELECT * FROM users WHERE name = :name", 
+                              params={"name": current_user_name})
+    except Exception as e:
+        st.error(f"Datenbankfehler in get_authorized_athletes: {e}")
+        return pd.DataFrame() # Leeres DataFrame zurückgeben bei Fehler
+        
 def load_all_athletes():
     conn = get_db_connection()
     # Wir nehmen alle User aus der Tabelle, um sie in der Liste anzuzeigen
@@ -180,7 +187,7 @@ if st.session_state.get('logged_in'):
         st.session_state['user'] = None
         st.session_state['role'] = None
         st.rerun()
-nav_mode = st.sidebar.radio("Navigation", ["Aktuelles Training einlesen", "Historie & Vergleich", "👤 Athleten verwalten"])
+nav_mode = st.sidebar.radio("Navigation", ["Training einlesen", "Daten & Auswertung", "👤 Athleten verwalten"])
 
 # --- ADMIN-CHECK ---
 if nav_mode == "👤 Athleten verwalten":
@@ -497,9 +504,21 @@ elif nav_mode == "Aktuelles Training einlesen":
                                 st.session_state['manual_intervals'].pop(idx); st.rerun()
         except Exception as e: st.error(f"Fehler bei der Analyse: {e}")
 
-elif nav_mode == "Trainingsdaten & Auswertung":
-    st.subheader("📊 Trainingsdaten & Auswertung")
-    
+elif nav_mode == "Daten & Auswertung":
+    st.subheader("📊 Daten & Auswertung")
+    # Debugging: Wir schauen, ob wir überhaupt User bekommen
+    try:
+        authorized_athletes = get_authorized_athletes(st.session_state['user'], st.session_state['role'])
+        st.write(f"DEBUG: Gefundene Athleten: {len(authorized_athletes)}") # Nur temporär
+        
+        if authorized_athletes.empty:
+            st.warning("Keine Athleten gefunden.")
+        else:
+            selected_name = st.selectbox("Athlet wählen:", authorized_athletes["name"])
+            # ... weiter wie bisher ...
+            
+    except Exception as e:
+        st.error(f"Fehler beim Laden: {e}")
     # Athleten-Auswahl (Rollenbasiert)
     authorized_athletes = get_authorized_athletes(st.session_state['user'], st.session_state['role'])
     selected_name = st.selectbox("Athlet wählen:", authorized_athletes["name"])
