@@ -506,77 +506,74 @@ elif nav_mode == "Aktuelles Training einlesen":
 
 elif nav_mode == "Daten & Auswertung":
     st.subheader("📊 Daten & Auswertung")
-    # Debugging: Wir schauen, ob wir überhaupt User bekommen
-    try:
-        authorized_athletes = get_authorized_athletes(st.session_state['user'], st.session_state['role'])
-        st.write(f"DEBUG: Gefundene Athleten: {len(authorized_athletes)}") # Nur temporär
-        
-        if authorized_athletes.empty:
-            st.warning("Keine Athleten gefunden.")
-        else:
-            selected_name = st.selectbox("Athlet wählen:", authorized_athletes["name"])
-            # ... weiter wie bisher ...
-            
-    except Exception as e:
-        st.error(f"Fehler beim Laden: {e}")
-    # Athleten-Auswahl (Rollenbasiert)
+    
+    # 1. Athleten laden
     authorized_athletes = get_authorized_athletes(st.session_state['user'], st.session_state['role'])
-    selected_name = st.selectbox("Athlet wählen:", authorized_athletes["name"], key="athlete_selector")
-    athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
     
-    # Athleten-Profil Steckbrief
-    with st.expander("👤 Athleten-Profil", expanded=True):
-        stats = get_athlete_stats_from_intervals(athlete_row['api_key'])
-        if stats:
-            cols = st.columns(3)
-            cols[0].metric("Name", stats['Name'])
-            cols[1].metric("Geschlecht", stats['Geschlecht'])
-            cols[2].metric("Ort", stats['Ort'])
-        else:
-            st.error("Konnte Daten nicht laden.")
-
-    # Datenbank-Abfrage gefiltert nach der gewählten user_id
-    conn = get_db_connection()
-    df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": athlete_row['id']})
-    
-    if df_workouts.empty: 
-        st.info(f"Keine Trainingsdaten für {selected_name} gefunden.")
+    if authorized_athletes.empty:
+        st.warning("Keine Athleten gefunden.")
     else:
-        filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"])
-        if filter_type != "ALLE": df_workouts = df_workouts[df_workouts['type'] == filter_type]
+        # 2. Einzige Selectbox mit eindeutigem Key
+        selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="unique_athlete_selector")
         
-        search_query = st.text_input("Suche nach Dateiname/Datum:")
-        if search_query:
-            df_workouts = df_workouts[df_workouts['filename'].str.contains(search_query, case=False, na=False) | df_workouts['date'].str.contains(search_query, case=False, na=False)]
+        # Athleten-Daten extrahieren
+        athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
+        
+        # 3. Profil-Steckbrief
+        with st.expander("👤 Athleten-Profil", expanded=True):
+            stats = get_athlete_stats_from_intervals(athlete_row['api_key'])
+            if stats:
+                cols = st.columns(3)
+                cols[0].metric("Name", stats['Name'])
+                cols[1].metric("Geschlecht", stats['Geschlecht'])
+                cols[2].metric("Ort", stats['Ort'])
+            else:
+                st.error("Konnte Daten nicht laden.")
 
-        selected_ids = []
-        for idx, row in df_workouts.iterrows():
-            col_check, col_del = st.columns([0.85, 0.15])
-            with col_check:
-                if st.checkbox(f"{row['date']} | {row['type']} ({row['structure']}) | {row['filename']}", key=f"wb_{row['id']}"):
-                    selected_ids.append(row['id'])
-            with col_del:
-                if st.button("🗑️", key=f"del_{row['id']}"):
-                    with conn.session as s:
-                        s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": row['id']})
-                        s.commit()
-                    st.rerun()
-
-        if len(selected_ids) >= 2:
-            st.markdown("---")
-            ids_string = ",".join(map(str, selected_ids))
-            df_compare = conn.query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})")
-            df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
+        # 4. Workouts laden (mit Typ-Cast für die ID)
+        conn = get_db_connection()
+        # WICHTIG: Hier casten wir die ID explizit zu int, um den DatabaseError zu vermeiden
+        uid_val = int(athlete_row['id'])
+        df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": uid_val})
+        
+        if df_workouts.empty: 
+            st.info(f"Keine Trainingsdaten für {selected_name} gefunden.")
+        else:
+            filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"], key="filter_type_selector")
+            if filter_type != "ALLE": df_workouts = df_workouts[df_workouts['type'] == filter_type]
             
-            c1, c2, c3 = st.columns(3)
-            with c1: st.plotly_chart(px.scatter(df_compare, x="interval_num", y="avg_power", color="Workout", title="Ø Watt").update_traces(mode='lines+markers').update_layout(template="plotly_dark"))
-            with c2:
-                fig_hr = go.Figure()
-                for w in df_compare['Workout'].unique():
-                    sub = df_compare[df_compare['Workout'] == w]
-                    fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr'], name=f"{w} (Ø)", mode='lines+markers'))
-                    fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr_p'], name=f"{w} (20-80%)", mode='markers'))
-                fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark")
-                st.plotly_chart(fig_hr)
-            with c3: 
-                st.plotly_chart(px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF").update_traces(mode='lines+markers').update_layout(template="plotly_dark"))
+            search_query = st.text_input("Suche nach Dateiname/Datum:", key="search_input")
+            if search_query:
+                df_workouts = df_workouts[df_workouts['filename'].str.contains(search_query, case=False, na=False) | df_workouts['date'].str.contains(search_query, case=False, na=False)]
+
+            selected_ids = []
+            for idx, row in df_workouts.iterrows():
+                col_check, col_del = st.columns([0.85, 0.15])
+                with col_check:
+                    if st.checkbox(f"{row['date']} | {row['type']} ({row['structure']}) | {row['filename']}", key=f"wb_{row['id']}"):
+                        selected_ids.append(row['id'])
+                with col_del:
+                    if st.button("🗑️", key=f"del_{row['id']}"):
+                        with conn.session as s:
+                            s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": row['id']})
+                            s.commit()
+                        st.rerun()
+
+            if len(selected_ids) >= 2:
+                st.markdown("---")
+                ids_string = ",".join(map(str, selected_ids))
+                df_compare = conn.query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})")
+                df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
+                
+                c1, c2, c3 = st.columns(3)
+                with c1: st.plotly_chart(px.scatter(df_compare, x="interval_num", y="avg_power", color="Workout", title="Ø Watt").update_traces(mode='lines+markers').update_layout(template="plotly_dark", width='stretch'))
+                with c2:
+                    fig_hr = go.Figure()
+                    for w in df_compare['Workout'].unique():
+                        sub = df_compare[df_compare['Workout'] == w]
+                        fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr'], name=f"{w} (Ø)", mode='lines+markers'))
+                        fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr_p'], name=f"{w} (20-80%)", mode='markers'))
+                    fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark", width='stretch')
+                    st.plotly_chart(fig_hr)
+                with c3: 
+                    st.plotly_chart(px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF").update_traces(mode='lines+markers').update_layout(template="plotly_dark", width='stretch'))
