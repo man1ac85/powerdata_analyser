@@ -149,41 +149,43 @@ def download_original_fit_file(api_key, activity_id):
 st.title("Dashboard BETA: Cloud-Schnittstelle & Smart-Filter Cockpit")
 nav_mode = st.sidebar.radio("Navigation", ["Aktuelles Training einlesen", "Historie & Vergleich", "👤 Athleten verwalten"])
 
+# --- ADMIN-CHECK ---
 if nav_mode == "👤 Athleten verwalten":
-    st.subheader("👤 Athleten-Profile verwalten")
-    col_left, col_right = st.columns(2)
-    
-    if st.session_state.get('user') == "Bastian": 
-    st.subheader("🛠️ Admin: Athleten verwalten")
-    col_left, col_right = st.columns(2)
-    
+    # WICHTIG: Alles ab hier muss eingerückt sein!
+    if st.session_state.get('user') == "Bastian":
+        st.subheader("🛠️ Admin: Athleten verwalten")
+        col_left, col_right = st.columns(2)
+        
         with col_left:
-            st.markdown("### ➕ Athlet anlegen")
+            st.markdown("### ➕ Neuen Athleten anlegen")
             with st.form("new_athlete_form", clear_on_submit=True):
                 name_in = st.text_input("Name:")
                 key_in = st.text_input("API Key:", type="password")
-                pwd_in = st.text_input("Passwort:", type="password")
+                pwd_in = st.text_input("Start-Passwort:", type="password")
                 submitted = st.form_submit_button("Speichern")
+                
                 if submitted:
                     if name_in and key_in and pwd_in:
                         success, message = add_new_athlete(name_in, key_in, pwd_in)
                         if success: st.success(message)
                         else: st.error(message)
-    
+                    else:
+                        st.warning("Bitte alle Felder ausfüllen!")
+        
         with col_right:
             st.markdown("### 🗑️ Athlet löschen")
             df_all = load_all_athletes()
             if not df_all.empty:
-                del_name = st.selectbox("Wähle Athlet:", df_all["name"])
+                del_name = st.selectbox("Wähle Athlet zum Löschen:", df_all["name"])
                 if st.button("Löschen"):
                     conn = get_db_connection()
                     with conn.session as s:
                         s.execute(text("DELETE FROM users WHERE name = :name"), {"name": del_name})
                         s.commit()
-                    st.success(f"{del_name} gelöscht")
+                    st.success(f"Athlet {del_name} wurde gelöscht.")
                     st.rerun()
     else:
-        st.info("Bereich nur für Admin sichtbar.")
+        st.error("Zugriff verweigert! Nur für den Administrator.")
 
 elif nav_mode == "Aktuelles Training einlesen":
     df_all_users = load_all_athletes()
