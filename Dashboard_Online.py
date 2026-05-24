@@ -157,31 +157,31 @@ if nav_mode == "👤 Athleten verwalten":
     st.subheader("🛠️ Admin: Athleten verwalten")
     col_left, col_right = st.columns(2)
     
-    with col_left:
-        st.markdown("### ➕ Athlet anlegen")
-        with st.form("new_athlete_form", clear_on_submit=True):
-            name_in = st.text_input("Name:")
-            key_in = st.text_input("API Key:", type="password")
-            pwd_in = st.text_input("Passwort:", type="password")
-            submitted = st.form_submit_button("Speichern")
-            if submitted:
-                if name_in and key_in and pwd_in:
-                    success, message = add_new_athlete(name_in, key_in, pwd_in)
-                    if success: st.success(message)
-                    else: st.error(message)
+        with col_left:
+            st.markdown("### ➕ Athlet anlegen")
+            with st.form("new_athlete_form", clear_on_submit=True):
+                name_in = st.text_input("Name:")
+                key_in = st.text_input("API Key:", type="password")
+                pwd_in = st.text_input("Passwort:", type="password")
+                submitted = st.form_submit_button("Speichern")
+                if submitted:
+                    if name_in and key_in and pwd_in:
+                        success, message = add_new_athlete(name_in, key_in, pwd_in)
+                        if success: st.success(message)
+                        else: st.error(message)
     
-    with col_right:
-        st.markdown("### 🗑️ Athlet löschen")
-        df_all = load_all_athletes()
-        if not df_all.empty:
-            del_name = st.selectbox("Wähle Athlet:", df_all["name"])
-            if st.button("Löschen"):
-                conn = get_db_connection()
-                with conn.session as s:
-                    s.execute(text("DELETE FROM users WHERE name = :name"), {"name": del_name})
-                    s.commit()
-                st.success(f"{del_name} gelöscht")
-                st.rerun()
+        with col_right:
+            st.markdown("### 🗑️ Athlet löschen")
+            df_all = load_all_athletes()
+            if not df_all.empty:
+                del_name = st.selectbox("Wähle Athlet:", df_all["name"])
+                if st.button("Löschen"):
+                    conn = get_db_connection()
+                    with conn.session as s:
+                        s.execute(text("DELETE FROM users WHERE name = :name"), {"name": del_name})
+                        s.commit()
+                    st.success(f"{del_name} gelöscht")
+                    st.rerun()
     else:
         st.info("Bereich nur für Admin sichtbar.")
 
