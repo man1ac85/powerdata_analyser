@@ -356,21 +356,19 @@ elif nav_mode == "Daten & Auswertung":
             selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="unique_athlete_selector")
         
         athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
-
+        
         with col_prof:
-                    st.markdown("##### 👤 Profil")
-                    stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['id'])
-                    
-                    # Jetzt ziehen wir die Daten aus dem Dictionary, das wir oben gebaut haben
-                    profile_data = pd.DataFrame({
-                        "Feld": ["Name", "FTP", "Max HF"],
-                        "Wert": [stats['Name'], f"{stats['FTP']} W", f"{stats['Max HR']}"]
-                    })
-                    st.table(profile_data)
-
+            st.markdown("##### 👤 Profil")
+            stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['id'])
+            
+            if stats:
+                profile_data = pd.DataFrame({
+                    "Feld": ["Name", "FTP", "Max HF"],
+                    "Wert": [stats['Name'], f"{stats['FTP']} W", f"{stats['Max HR']}"]
+                })
+                st.table(profile_data)
             else:
                 st.error("Konnte Profildaten nicht laden.")
-
         conn = get_db_connection()
         uid_val = int(athlete_row['id'])
         df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": uid_val})
