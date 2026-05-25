@@ -388,7 +388,7 @@ elif nav_mode == "Daten & Auswertung":
                 })
                 
                 # Tabelle ohne Header anzeigen
-                st.table(profile_df.set_axis(['', ''], axis=1))
+                st.table(profile_df.set_axis(['', ' '], axis=1))
             else:
                 st.error("Konnte Profildaten nicht laden.")
 
