@@ -504,7 +504,8 @@ elif nav_mode == "Aktuelles Training einlesen":
                             if st.button(f"Löschen Intervall {idx+1}", key=f"del_{idx}"):
                                 st.session_state['manual_intervals'].pop(idx); st.rerun()
         except Exception as e: st.error(f"Fehler bei der Analyse: {e}")
-            
+
+
 elif nav_mode == "Daten & Auswertung":
     st.subheader("📊 Daten & Auswertung")
     
@@ -534,7 +535,8 @@ elif nav_mode == "Daten & Auswertung":
             st.info(f"Keine Trainingsdaten für {selected_name} gefunden.")
         else:
             filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"], key="filter_type_selector")
-            if filter_type != "ALLE": df_workouts = df_workouts[df_workouts['type'] == filter_type]
+            if filter_type != "ALLE": 
+                df_workouts = df_workouts[df_workouts['type'] == filter_type]
             
             search_query = st.text_input("Suche nach Dateiname/Datum:", key="search_input")
             if search_query:
@@ -544,6 +546,7 @@ elif nav_mode == "Daten & Auswertung":
             for idx, row in df_workouts.iterrows():
                 col_check, col_del = st.columns([0.85, 0.15])
                 with col_check:
+                    # Der key hier ist wichtig, damit er nicht mit anderen Dingen kollidiert
                     if st.checkbox(f"{row['date']} | {row['type']} ({row['structure']}) | {row['filename']}", key=f"wb_{row['id']}"):
                         selected_ids.append(row['id'])
                 with col_del:
@@ -565,7 +568,7 @@ elif nav_mode == "Daten & Auswertung":
                     with c1: 
                         fig1 = px.scatter(df_compare, x="interval_num", y="avg_power", color="Workout", title="Ø Watt")
                         fig1.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
-                        st.plotly_chart(fig1, width='stretch')
+                        st.plotly_chart(fig1, use_container_width=True)
                     with c2:
                         fig_hr = go.Figure()
                         for w in df_compare['Workout'].unique():
@@ -573,8 +576,8 @@ elif nav_mode == "Daten & Auswertung":
                             fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr'], name=f"{w} (Ø)", mode='lines+markers'))
                             fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr_p'], name=f"{w} (20-80%)", mode='markers'))
                         fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark")
-                        st.plotly_chart(fig_hr, width='stretch')
+                        st.plotly_chart(fig_hr, use_container_width=True)
                     with c3: 
                         fig3 = px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF")
                         fig3.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
-                        st.plotly_chart(fig3, width='stretch')    
+                        st.plotly_chart(fig3, use_container_width=True)            
