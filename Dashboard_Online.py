@@ -17,35 +17,35 @@ from supabase import create_client, Client
 # --- DATENBANK & KONFIGURATION ---
 st.set_page_config(page_title="Advanced Power Data Analyser", layout="wide")
 def get_athlete_stats_from_intervals(api_key, user_id):
-    url = "https://intervals.icu/api/v1/athlete/me/profile"
-    response = requests.get(url, auth=HTTPBasicAuth('API_KEY', api_key))
+    auth = HTTPBasicAuth('API_KEY', api_key)
+    # 1. Profil holen
+    res_profile = requests.get("https://intervals.icu/api/v1/athlete/me/profile", auth=auth)
+    # 2. Sport-Settings holen
+    res_sports = requests.get(f"https://intervals.icu/api/v1/athlete/i{user_id}/sport-settings", auth=auth)
     
-    if response.status_code == 200:
-        data = response.json().get('athlete', {})
-        # Mapping der API-Felder
-        api_data = {
-            "ftp": data.get('ftp'),
-            "weight": data.get('weight'),
-            "max_hr": data.get('max_hr')
-        }
+    stats = {"Name": "Unbekannt", "FTP": "-", "Weight": "-", "Max HR": "-"}
+    
+    if res_profile.status_code == 200:
+        ath = res_profile.json().get('athlete', {})
+        stats["Name"] = ath.get('name')
         
-        # Vergleich mit DB & ggf. Update
+    if res_sports.status_code == 200:
+        sports = res_sports.json()
+        # Suche das Cycling-Objekt (Ride ist in der Liste bei 'types' enthalten)
+        cycling = next((s for s in sports if "Ride" in s.get('types', [])), None)
+        if cycling:
+            stats["FTP"] = cycling.get('ftp', '-')
+            stats["Max HR"] = cycling.get('max_hr', '-')
+    
+    # DB Sync (falls nötig)
+    if stats["FTP"] != "-":
         conn = get_db_connection()
         with conn.session as s:
-            s.execute(text("""
-                UPDATE users 
-                SET ftp = :ftp, weight = :weight, max_hr = :max_hr 
-                WHERE id = :uid
-            """), {"ftp": api_data['ftp'], "weight": api_data['weight'], "max_hr": api_data['max_hr'], "uid": user_id})
+            s.execute(text("UPDATE users SET ftp = :ftp, max_hr = :mhr WHERE id = :uid"), 
+                      {"ftp": stats["FTP"], "mhr": stats["Max HR"], "uid": user_id})
             s.commit()
             
-        return {
-            "Name": data.get('name'),
-            "Geschlecht": "Weiblich" if data.get('sex') == 'F' else "Männlich",
-            "Ort": f"{data.get('city')}, {data.get('country')}",
-            **api_data
-        }
-    return None
+    return stats
 def get_db_connection():
     # Streamlit connection (nutzt automatisch psycopg3, wenn in requirements.txt)
     return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
@@ -356,24 +356,18 @@ elif nav_mode == "Daten & Auswertung":
             selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="unique_athlete_selector")
         
         athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
-        
+
         with col_prof:
-            st.markdown("##### 👤 Profil")
-            # Aufruf der aktualisierten Funktion mit user_id für den Sync
-            stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['id'])
-            
-            if stats:
-                profile_data = {
-                    "Attribut": ["Name", "FTP", "Gewicht", "Max HF"],
-                    "Wert": [
-                        stats.get('Name', '-'), 
-                        f"{stats.get('ftp', '-')} W", 
-                        f"{stats.get('weight', '-')} kg", 
-                        f"{stats.get('max_hr', '-')}"
-                    ]
-                }
-                # st.table sorgt für die kompakte Darstellung
-                st.table(pd.DataFrame(profile_data))
+                    st.markdown("##### 👤 Profil")
+                    stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['id'])
+                    
+                    # Jetzt ziehen wir die Daten aus dem Dictionary, das wir oben gebaut haben
+                    profile_data = pd.DataFrame({
+                        "Feld": ["Name", "FTP", "Max HF"],
+                        "Wert": [stats['Name'], f"{stats['FTP']} W", f"{stats['Max HR']}"]
+                    })
+                    st.table(profile_data)
+
             else:
                 st.error("Konnte Profildaten nicht laden.")
 
