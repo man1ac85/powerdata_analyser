@@ -308,8 +308,7 @@ elif nav_mode == "Aktuelles Training einlesen":
                         df['timestamp'] = pd.to_datetime(df['timestamp'])
                         df.set_index('timestamp', inplace=True)
                         filename = selected_activity_name
-                    else
-                    st.info("Bitte zuerst eine Datei laden oder ein Training auswählen.")
+                    else: st.info("Bitte zuerst eine Datei laden oder ein Training auswählen.")
                 except Exception as ex: st.error(f"Fehler beim Parsen: {ex}")
 
     elif uploaded_file is not None:
