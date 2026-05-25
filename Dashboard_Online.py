@@ -304,10 +304,12 @@ elif nav_mode == "Aktuelles Training einlesen":
                     fitfile = fitparse.FitFile(io.BytesIO(binary_content))
                     records = [record.get_values() for record in fitfile.get_messages('record')]
                     df = pd.DataFrame(records)
-                    if not df.empty and 'timestamp' in df.columns:
+                    if not df.empty:
                         df['timestamp'] = pd.to_datetime(df['timestamp'])
                         df.set_index('timestamp', inplace=True)
                         filename = selected_activity_name
+                    else
+                    st.info("Bitte zuerst eine Datei laden oder ein Training auswählen.")
                 except Exception as ex: st.error(f"Fehler beim Parsen: {ex}")
 
     elif uploaded_file is not None:
@@ -574,6 +576,6 @@ elif nav_mode == "Daten & Auswertung":
                         fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark")
                         st.plotly_chart(fig_hr, width='stretch')
                     with c3: 
-                        fig3 = px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF")
-                        fig3.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
-                        st.plotly_chart(fig3, width='stretch')
+                    fig3 = px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF")
+                    fig3.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
+                    st.plotly_chart(fig3, width='stretch')
