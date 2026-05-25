@@ -575,6 +575,6 @@ elif nav_mode == "Daten & Auswertung":
                         fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark")
                         st.plotly_chart(fig_hr, width='stretch')
                     with c3: 
-                    fig3 = px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF")
-                    fig3.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
-                    st.plotly_chart(fig3, width='stretch')    
+                        fig3 = px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF")
+                        fig3.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
+                        st.plotly_chart(fig3, width='stretch')    
