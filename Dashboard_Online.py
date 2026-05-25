@@ -29,12 +29,11 @@ def get_athlete_stats_from_intervals(api_key, user_id):
     if res_profile.status_code == 200:
         ath = res_profile.json().get('athlete', {})
         stats["Name"] = ath.get('name')
-        stats["Weight"] = ath.get('weight', '-') # Wird oft hier geliefert
-        # Alter berechnen, falls Geburtsdatum vorhanden
+        stats["Weight"] = ath.get('weight', '-')
         dob = ath.get('dob')
         if dob:
             birth_year = int(dob[:4])
-            stats["Age"] = datetime.now().year - birth_year
+            stats["Age"] = datetime.now().year - int(dob.split('-')[0])
         
     if res_sports.status_code == 200:
         sports = res_sports.json()
@@ -360,7 +359,7 @@ elif nav_mode == "Daten & Auswertung":
     else:
         # Layout: Wir teilen den Platz auf (links: Filter, rechts: Profil)
         # Die Spaltenbreite [1, 1] sorgt dafür, dass sie schmal bleiben
-        c_left, c_right = st.columns([1, 1])
+        c_left, c_right = st.columns([300, 700])
         
         with c_left:
             selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="data_eval_athlete_selector")
@@ -373,22 +372,23 @@ elif nav_mode == "Daten & Auswertung":
             stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['id'])
             
             if stats:
-                # API-Werte aufbereiten (aus dem Test-JSON)
-                name = stats.get('Name', athlete_row['name'])
-                ftp = float(stats.get('FTP', 0)) if stats.get('FTP') != '-' else 0
-                weight = float(stats.get('Weight', 75)) if stats.get('Weight') != '-' else 75
-                max_hr = stats.get('Max HR', '-')
-                age = stats.get('Age', '-') # Falls das Feld im API-Call geliefert wird
+                # Berechnungen
+                ftp = float(stats.get('FTP', 0)) if str(stats.get('FTP')).replace('.','',1).isdigit() else 0
+                weight = float(stats.get('Weight', 0)) if str(stats.get('Weight')).replace('.','',1).isdigit() else 0
                 w_kg = round(ftp / weight, 2) if weight > 0 else 0
                 
-                # Datenstruktur gemäß deiner Vorgabe
-                profile_df = pd.DataFrame({
-                    "Spalte1": [f"{name}", f"{age} Jahre", f"{ftp} W", f"{max_hr} bpm"],
-                    "Spalte2": [f"Stand: {datetime.now().strftime('%d.%m.%y')}", f"{weight} kg", f"{w_kg} W/kg", ""]
-                })
+                # Wir bauen die Daten direkt ohne Header auf
+                # Spalte 1: Name, Alter, FTP, Max HF
+                # Spalte 2: Datum, Gewicht, W/kg, (leer)
+                data = [
+                    [f"{athlete_row['name']}", f"Stand: {datetime.now().strftime('%d.%m.%y')}"],
+                    [f"{stats.get('Age', '-')} Jahre", f"{stats.get('Weight', '-')} kg"],
+                    [f"FTP: {ftp} W", f"{w_kg} W/kg"],
+                    [f"Max HF: {stats.get('Max HR', '-')} bpm", ""]
+                ]
                 
-                # Tabelle ohne Header anzeigen
-                st.table(profile_df.set_axis(['', ' '], axis=1))
+                # Tabelle ohne Index und ohne Header (mit Leerzeichen als unsichtbarer Spaltenname)
+                st.table(pd.DataFrame(data, columns=[' ', '  ']))
             else:
                 st.error("Konnte Profildaten nicht laden.")
 
