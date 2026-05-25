@@ -349,26 +349,41 @@ elif nav_mode == "Daten & Auswertung":
     if authorized_athletes.empty:
         st.warning("Keine Athleten gefunden.")
     else:
-        # Layout: 4/5 für die Auswahl, 1/5 für das Profil
-        col_main, col_prof = st.columns([4, 1])
+        # Layout: Links schmal (2 Einheiten), Rechts Profil (1 Einheit)
+        col_main, col_prof = st.columns([2, 1])
         
         with col_main:
+            # Begrenzung der Breite der Auswahlfelder
             selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="unique_athlete_selector")
-        
-        athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
-        
+            athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
+            
+            st.markdown("---")
+            filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"], key="filter_type_selector")
+            search_query = st.text_input("Suche nach Dateiname/Datum:", key="search_input")
+
         with col_prof:
             st.markdown("##### 👤 Profil")
             stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['id'])
             
             if stats:
-                profile_data = pd.DataFrame({
-                    "Feld": ["Name", "FTP", "Max HF"],
-                    "Wert": [stats['Name'], f"{stats['FTP']} W", f"{stats['Max HR']}"]
-                })
-                st.table(profile_data)
+                # Berechnung der Zusatzwerte
+                ftp = float(stats.get('FTP', 0)) if str(stats.get('FTP')).isdigit() else 0
+                weight = float(stats.get('Weight', 0)) if str(stats.get('Weight')).replace('.','',1).isdigit() else 1
+                w_kg = round(ftp / weight, 2) if weight > 0 else 0
+                
+                # Kompakte Datenstruktur ohne Header
+                profile_data = {
+                    "Name": [stats.get('Name'), f"Stand: {datetime.now().strftime('%d.%m.%y')}"],
+                    "Alter/Gewicht": [f"{stats.get('Age', '-')} J", f"{stats.get('Weight', '-')} kg"],
+                    "FTP/Leistung": [f"{ftp} W", f"{w_kg} W/kg"],
+                    "Max HF": [f"{stats.get('Max HR', '-')} bpm", ""]
+                }
+                # Als DataFrame ohne Index und ohne Header-Namen
+                st.table(pd.DataFrame(profile_data).T.set_axis(['Wert 1', 'Wert 2'], axis=1))
             else:
                 st.error("Konnte Profildaten nicht laden.")
+
+        
         conn = get_db_connection()
         uid_val = int(athlete_row['id'])
         df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": uid_val})
