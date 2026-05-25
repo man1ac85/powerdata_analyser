@@ -15,7 +15,7 @@ from sqlalchemy import text
 from supabase import create_client, Client
 
 # --- DATENBANK & KONFIGURATION ---
-st.set_page_config(page_title="FIT Analyzer Pro Cloud", layout="wide")
+st.set_page_config(page_title="Advanced Power Data Analyser", layout="wide")
 def get_athlete_stats_from_intervals(api_key):
     # Abfrage der Stammdaten
     url = "https://intervals.icu/api/v1/athlete/me/profile"
@@ -180,7 +180,7 @@ def download_original_fit_file(api_key, activity_id):
     except Exception as e: return None, str(e)
 
 # --- SURFACE LAYOUT ---
-st.title("Dashboard BETA: Cloud-Schnittstelle & Smart-Filter Cockpit")
+st.title("Powerdata Dashboard")
 # LOGOUT
 if st.session_state.get('logged_in'):
     if st.sidebar.button("🚪 Ausloggen"):
