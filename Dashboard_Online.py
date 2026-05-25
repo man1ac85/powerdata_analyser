@@ -204,6 +204,7 @@ if nav_mode == "👤 Athleten verwalten":
             with st.form("new_athlete_form", clear_on_submit=True):
                 name_in = st.text_input("Name:")
                 key_in = st.text_input("API Key:", type="password")
+                id_in = st.text_input("Intervals.icu ID (z.B. 75948):")
                 pwd_in = st.text_input("Start-Passwort:", type="password")
                 submitted = st.form_submit_button("Speichern")
                 
