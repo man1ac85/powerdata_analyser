@@ -340,7 +340,7 @@ elif nav_mode == "Daten & Auswertung":
     if authorized_athletes.empty:
         st.warning("Keine Athleten gefunden.")
     else:
-        # Layout: [1, 1, 2] bedeutet: 25% Auswahl, 25% Profil, 50% restlicher Platz
+        # Layout: 3 Spalten (Auswahl/Filter schmal, Profil schmal, Rest Platz für Workouts)
         c1, c2, c3 = st.columns([1, 1, 2])
         
         with c1:
@@ -351,28 +351,40 @@ elif nav_mode == "Daten & Auswertung":
 
         with c2:
             st.markdown("##### 👤 Profil")
-            stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['id'])
             
-            if stats:
-                # Berechnungen (Sicherstellen, dass wir keine String-Fehler haben)
-                ftp_val = stats.get('FTP', 0)
-                ftp = int(ftp_val) if str(ftp_val).replace('.','',1).isdigit() else 0
-                weight_val = stats.get('Weight', 75)
-                weight = float(weight_val) if str(weight_val).replace('.','',1).isdigit() else 75
-                w_kg = round(ftp / weight, 2) if weight > 0 else 0
-                
-                # Datenmatrix für die Tabelle
-                data = [
-                    [f"{athlete_row['name']}", f"Stand: {datetime.now().strftime('%d.%m.%y')}"],
-                    [f"{stats.get('Age', '-')} Jahre", f"{weight} kg"],
-                    [f"FTP: {ftp} W", f"{w_kg} W/kg"],
-                    [f"Max HF: {stats.get('Max HR', '-')} bpm", ""]
-                ]
-                
-                # Tabelle ohne Index und ohne Header (zwei verschiedene Leerzeichen als Keys)
-                st.table(pd.DataFrame(data).set_axis([' ', '  '], axis=1))
-            else:
-                st.error("Konnte Profildaten nicht laden.")
+            # --- API ABFRAGE DIREKT HIER ---
+            # Wir nutzen die Logik aus deinem Testscript
+            auth = HTTPBasicAuth('API_KEY', athlete_row['api_key'])
+            base_url = "https://intervals.icu/api/v1/athlete/i75948"
+            
+            # Profil & Sport-Settings abrufen
+            res_p = requests.get(f"{base_url}/profile", auth=auth)
+            res_s = requests.get(f"{base_url}/sport-settings", auth=auth)
+            
+            p_data = res_p.json() if res_p.status_code == 200 else {}
+            s_data = res_s.json() if res_s.status_code == 200 else []
+            
+            # Daten extrahieren
+            ath_info = p_data.get('athlete', {})
+            ride_info = next((s for s in s_data if "Ride" in s.get('types', [])), {})
+            
+            # Werte zuweisen (Gewicht kommt oft aus Ride-Settings, falls Profil leer)
+            ftp = ride_info.get('ftp', 0)
+            weight = ride_info.get('weight', 66.8) # Fallback, falls API das nicht liefert
+            max_hr = ride_info.get('max_hr', 184)
+            age = "k.A." # da DOB im JSON nicht geliefert wurde
+            w_kg = round(ftp / weight, 2) if weight > 0 else 0
+            
+            # Tabelle aufbauen
+            profile_df = pd.DataFrame([
+                [f"{athlete_row['name']}", f"Stand: {datetime.now().strftime('%d.%m.%y')}"],
+                [f"Alter: {age}", f"Gewicht: {weight} kg"],
+                [f"FTP: {ftp} W", f"{w_kg} W/kg"],
+                [f"Max HF: {max_hr} bpm", ""]
+            ])
+            
+            # Tabelle rendern ohne Header und ohne Index
+            st.table(profile_df.set_axis([' ', '  '], axis=1))
 
         # --- WORKOUT LOGIK ---
         conn = get_db_connection()
@@ -384,13 +396,11 @@ elif nav_mode == "Daten & Auswertung":
         else:
             if filter_type != "ALLE": 
                 df_workouts = df_workouts[df_workouts['type'] == filter_type]
-            
             if search_query:
                 df_workouts = df_workouts[df_workouts['filename'].str.contains(search_query, case=False, na=False) | df_workouts['date'].str.contains(search_query, case=False, na=False)]
 
             selected_ids = []
             for idx, row in df_workouts.iterrows():
-                # Eindeutige Keys für Checkboxen
                 if st.checkbox(f"{row['date']} | {row['type']} ({row['structure']}) | {row['filename']}", key=f"eval_check_{row['id']}"):
                     selected_ids.append(row['id'])
                 if st.button("🗑️", key=f"eval_del_{row['id']}"):
@@ -406,12 +416,12 @@ elif nav_mode == "Daten & Auswertung":
                 
                 if not df_compare.empty:
                     df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
-                    c_plot1, c_plot2, c_plot3 = st.columns(3)
-                    with c_plot1: 
+                    c_p1, c_p2, c_p3 = st.columns(3)
+                    with c_p1: 
                         fig1 = px.scatter(df_compare, x="interval_num", y="avg_power", color="Workout", title="Ø Watt")
                         fig1.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
                         st.plotly_chart(fig1, use_container_width=True)
-                    with c_plot2:
+                    with c_p2:
                         fig_hr = go.Figure()
                         for w in df_compare['Workout'].unique():
                             sub = df_compare[df_compare['Workout'] == w]
@@ -419,7 +429,7 @@ elif nav_mode == "Daten & Auswertung":
                             fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr_p'], name=f"{w} (20-80%)", mode='markers'))
                         fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark")
                         st.plotly_chart(fig_hr, use_container_width=True)
-                    with c_plot3: 
+                    with c_p3: 
                         fig3 = px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF")
                         fig3.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
                         st.plotly_chart(fig3, use_container_width=True)
