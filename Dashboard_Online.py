@@ -349,41 +349,36 @@ elif nav_mode == "Daten & Auswertung":
     if authorized_athletes.empty:
         st.warning("Keine Athleten gefunden.")
     else:
-        # Layout: Links schmal (2 Einheiten), Rechts Profil (1 Einheit)
         col_main, col_prof = st.columns([2, 1])
         
         with col_main:
-            # Begrenzung der Breite der Auswahlfelder
-            selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="unique_athlete_selector")
+            # Eindeutige Keys mit "data_eval_" Präfix
+            selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="data_eval_athlete_selector")
             athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
             
             st.markdown("---")
-            filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"], key="filter_type_selector")
-            search_query = st.text_input("Suche nach Dateiname/Datum:", key="search_input")
+            filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"], key="data_eval_filter_type")
+            search_query = st.text_input("Suche nach Dateiname/Datum:", key="data_eval_search_input")
 
         with col_prof:
             st.markdown("##### 👤 Profil")
             stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['id'])
             
             if stats:
-                # Berechnung der Zusatzwerte
                 ftp = float(stats.get('FTP', 0)) if str(stats.get('FTP')).isdigit() else 0
                 weight = float(stats.get('Weight', 0)) if str(stats.get('Weight')).replace('.','',1).isdigit() else 1
                 w_kg = round(ftp / weight, 2) if weight > 0 else 0
                 
-                # Kompakte Datenstruktur ohne Header
                 profile_data = {
                     "Name": [stats.get('Name'), f"Stand: {datetime.now().strftime('%d.%m.%y')}"],
                     "Alter/Gewicht": [f"{stats.get('Age', '-')} J", f"{stats.get('Weight', '-')} kg"],
                     "FTP/Leistung": [f"{ftp} W", f"{w_kg} W/kg"],
                     "Max HF": [f"{stats.get('Max HR', '-')} bpm", ""]
                 }
-                # Als DataFrame ohne Index und ohne Header-Namen
                 st.table(pd.DataFrame(profile_data).T.set_axis(['Wert 1', 'Wert 2'], axis=1))
             else:
                 st.error("Konnte Profildaten nicht laden.")
 
-        
         conn = get_db_connection()
         uid_val = int(athlete_row['id'])
         df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": uid_val})
@@ -391,11 +386,9 @@ elif nav_mode == "Daten & Auswertung":
         if df_workouts.empty: 
             st.info(f"Keine Trainingsdaten für {selected_name} gefunden.")
         else:
-            filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"], key="filter_type_selector")
             if filter_type != "ALLE": 
                 df_workouts = df_workouts[df_workouts['type'] == filter_type]
             
-            search_query = st.text_input("Suche nach Dateiname/Datum:", key="search_input")
             if search_query:
                 df_workouts = df_workouts[df_workouts['filename'].str.contains(search_query, case=False, na=False) | df_workouts['date'].str.contains(search_query, case=False, na=False)]
 
@@ -403,16 +396,18 @@ elif nav_mode == "Daten & Auswertung":
             for idx, row in df_workouts.iterrows():
                 col_check, col_del = st.columns([0.85, 0.15])
                 with col_check:
-                    if st.checkbox(f"{row['date']} | {row['type']} ({row['structure']}) | {row['filename']}", key=f"wb_{row['id']}"):
+                    # Key ist row['id'], das ist sicher einzigartig
+                    if st.checkbox(f"{row['date']} | {row['type']} ({row['structure']}) | {row['filename']}", key=f"eval_check_{row['id']}"):
                         selected_ids.append(row['id'])
                 with col_del:
-                    if st.button("🗑️", key=f"del_{row['id']}"):
+                    if st.button("🗑️", key=f"eval_del_{row['id']}"):
                         with conn.session as s:
                             s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": row['id']})
                             s.commit()
                         st.rerun()
 
-            # Plotting beginnt bereits ab 1 Datensatz
+            if len(selected_ids) >= 1:
+
             if len(selected_ids) >= 1:
                 st.markdown("---")
                 ids_string = ",".join(map(str, selected_ids))
