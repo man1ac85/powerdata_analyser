@@ -23,27 +23,36 @@ def get_athlete_stats_from_intervals(api_key, user_id):
     # 2. Sport-Settings holen
     res_sports = requests.get(f"https://intervals.icu/api/v1/athlete/i{user_id}/sport-settings", auth=auth)
     
-    stats = {"Name": "Unbekannt", "FTP": "-", "Weight": "-", "Max HR": "-"}
+    # Standard-Werte für alle Felder
+    stats = {"Name": "Unbekannt", "FTP": "-", "Weight": "-", "Max HR": "-", "Age": "-"}
     
     if res_profile.status_code == 200:
         ath = res_profile.json().get('athlete', {})
         stats["Name"] = ath.get('name')
+        stats["Weight"] = ath.get('weight', '-') # Wird oft hier geliefert
+        # Alter berechnen, falls Geburtsdatum vorhanden
+        dob = ath.get('dob')
+        if dob:
+            birth_year = int(dob[:4])
+            stats["Age"] = datetime.now().year - birth_year
         
     if res_sports.status_code == 200:
         sports = res_sports.json()
-        # Suche das Cycling-Objekt (Ride ist in der Liste bei 'types' enthalten)
         cycling = next((s for s in sports if "Ride" in s.get('types', [])), None)
         if cycling:
             stats["FTP"] = cycling.get('ftp', '-')
             stats["Max HR"] = cycling.get('max_hr', '-')
     
-    # DB Sync (falls nötig)
+    # DB Sync (nur wenn Werte gefunden wurden)
     if stats["FTP"] != "-":
-        conn = get_db_connection()
-        with conn.session as s:
-            s.execute(text("UPDATE users SET ftp = :ftp, max_hr = :mhr WHERE id = :uid"), 
-                      {"ftp": stats["FTP"], "mhr": stats["Max HR"], "uid": user_id})
-            s.commit()
+        try:
+            conn = get_db_connection()
+            with conn.session as s:
+                s.execute(text("UPDATE users SET ftp = :ftp, max_hr = :mhr WHERE id = :uid"), 
+                          {"ftp": stats["FTP"], "mhr": stats["Max HR"], "uid": user_id})
+                s.commit()
+        except Exception:
+            pass # Spalten existieren evtl. noch nicht, ignorieren
             
     return stats
 def get_db_connection():
@@ -349,40 +358,44 @@ elif nav_mode == "Daten & Auswertung":
     if authorized_athletes.empty:
         st.warning("Keine Athleten gefunden.")
     else:
-        col_main, col_prof = st.columns([2, 1])
+        # Layout: Wir teilen den Platz auf (links: Filter, rechts: Profil)
+        # Die Spaltenbreite [1, 1] sorgt dafür, dass sie schmal bleiben
+        c_left, c_right = st.columns([1, 1])
         
-        with col_main:
-            # Eindeutige Keys mit "data_eval_" Präfix
+        with c_left:
             selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="data_eval_athlete_selector")
             athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
-            
-            st.markdown("---")
             filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"], key="data_eval_filter_type")
-            search_query = st.text_input("Suche nach Dateiname/Datum:", key="data_eval_search_input")
+            search_query = st.text_input("Suche:", key="data_eval_search_input")
 
-        with col_prof:
+        with c_right:
             st.markdown("##### 👤 Profil")
             stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['id'])
             
             if stats:
-                ftp = float(stats.get('FTP', 0)) if str(stats.get('FTP')).isdigit() else 0
-                weight = float(stats.get('Weight', 0)) if str(stats.get('Weight')).replace('.','',1).isdigit() else 1
+                # API-Werte aufbereiten (aus dem Test-JSON)
+                name = stats.get('Name', athlete_row['name'])
+                ftp = float(stats.get('FTP', 0)) if stats.get('FTP') != '-' else 0
+                weight = float(stats.get('Weight', 75)) if stats.get('Weight') != '-' else 75
+                max_hr = stats.get('Max HR', '-')
+                age = stats.get('Age', '-') # Falls das Feld im API-Call geliefert wird
                 w_kg = round(ftp / weight, 2) if weight > 0 else 0
                 
-                profile_data = {
-                    "Name": [stats.get('Name'), f"Stand: {datetime.now().strftime('%d.%m.%y')}"],
-                    "Alter/Gewicht": [f"{stats.get('Age', '-')} J", f"{stats.get('Weight', '-')} kg"],
-                    "FTP/Leistung": [f"{ftp} W", f"{w_kg} W/kg"],
-                    "Max HF": [f"{stats.get('Max HR', '-')} bpm", ""]
-                }
-                st.table(pd.DataFrame(profile_data).T.set_axis(['Wert 1', 'Wert 2'], axis=1))
+                # Datenstruktur gemäß deiner Vorgabe
+                profile_df = pd.DataFrame({
+                    "Spalte1": [f"{name}", f"{age} Jahre", f"{ftp} W", f"{max_hr} bpm"],
+                    "Spalte2": [f"Stand: {datetime.now().strftime('%d.%m.%y')}", f"{weight} kg", f"{w_kg} W/kg", ""]
+                })
+                
+                # Tabelle ohne Header anzeigen
+                st.table(profile_df.set_axis(['', ''], axis=1))
             else:
                 st.error("Konnte Profildaten nicht laden.")
 
+        # --- WORKOUT LOGIK ---
         conn = get_db_connection()
-        uid_val = int(athlete_row['id'])
-        df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": uid_val})
-        
+        df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": int(athlete_row['id'])})
+       
         if df_workouts.empty: 
             st.info(f"Keine Trainingsdaten für {selected_name} gefunden.")
         else:
