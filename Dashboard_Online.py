@@ -407,8 +407,6 @@ elif nav_mode == "Daten & Auswertung":
                         st.rerun()
 
             if len(selected_ids) >= 1:
-
-            if len(selected_ids) >= 1:
                 st.markdown("---")
                 ids_string = ",".join(map(str, selected_ids))
                 df_compare = conn.query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})")
