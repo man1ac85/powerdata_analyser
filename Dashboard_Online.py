@@ -351,7 +351,8 @@ elif nav_mode == "Daten & Auswertung":
             # --- API ABFRAGE DIREKT HIER ---
             # Wir nutzen die Logik aus deinem Testscript
             auth = HTTPBasicAuth('API_KEY', athlete_row['api_key'])
-            base_url = "https://intervals.icu/api/v1/athlete/i75948"
+            athlete_id = athlete_row['intervals_id']
+            base_url = f"https://intervals.icu/api/v1/athlete/i{athlete_id}"
             
             # Profil & Sport-Settings abrufen
             res_p = requests.get(f"{base_url}/profile", auth=auth)
