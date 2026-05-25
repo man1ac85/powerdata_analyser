@@ -18,40 +18,23 @@ from supabase import create_client, Client
 st.set_page_config(page_title="Advanced Power Data Analyser", layout="wide")
 def get_athlete_stats_from_intervals(api_key, user_id):
     auth = HTTPBasicAuth('API_KEY', api_key)
-    # 1. Profil holen
     res_profile = requests.get("https://intervals.icu/api/v1/athlete/me/profile", auth=auth)
-    # 2. Sport-Settings holen
     res_sports = requests.get(f"https://intervals.icu/api/v1/athlete/i{user_id}/sport-settings", auth=auth)
     
-    # Standard-Werte für alle Felder
-    stats = {"Name": "Unbekannt", "FTP": "-", "Weight": "-", "Max HR": "-", "Age": "-"}
+    stats = {"Name": "Unbekannt", "FTP": 0, "Weight": 75, "Max HR": "-", "Age": "-"}
     
     if res_profile.status_code == 200:
-        ath = res_profile.json().get('athlete', {})
-        stats["Name"] = ath.get('name')
-        stats["Weight"] = ath.get('weight', '-')
-        dob = ath.get('dob')
-        if dob:
-            birth_year = int(dob[:4])
-            stats["Age"] = datetime.now().year - int(dob.split('-')[0])
+        data = res_profile.json().get('athlete', {})
+        stats["Name"] = data.get('name')
+        stats["Weight"] = data.get('weight', 75)
+        if data.get('dob'): stats["Age"] = datetime.now().year - int(data.get('dob')[:4])
         
     if res_sports.status_code == 200:
         sports = res_sports.json()
         cycling = next((s for s in sports if "Ride" in s.get('types', [])), None)
         if cycling:
-            stats["FTP"] = cycling.get('ftp', '-')
+            stats["FTP"] = cycling.get('ftp', 0)
             stats["Max HR"] = cycling.get('max_hr', '-')
-    
-    # DB Sync (nur wenn Werte gefunden wurden)
-    if stats["FTP"] != "-":
-        try:
-            conn = get_db_connection()
-            with conn.session as s:
-                s.execute(text("UPDATE users SET ftp = :ftp, max_hr = :mhr WHERE id = :uid"), 
-                          {"ftp": stats["FTP"], "mhr": stats["Max HR"], "uid": user_id})
-                s.commit()
-        except Exception:
-            pass # Spalten existieren evtl. noch nicht, ignorieren
             
     return stats
 def get_db_connection():
@@ -357,45 +340,45 @@ elif nav_mode == "Daten & Auswertung":
     if authorized_athletes.empty:
         st.warning("Keine Athleten gefunden.")
     else:
-        # Layout: Wir teilen den Platz auf (links: Filter, rechts: Profil)
-        # Die Spaltenbreite [1, 1] sorgt dafür, dass sie schmal bleiben
-        c_left, c_right = st.columns([300, 700])
+        # Layout: [1, 1, 2] bedeutet: 25% Auswahl, 25% Profil, 50% restlicher Platz
+        c1, c2, c3 = st.columns([1, 1, 2])
         
-        with c_left:
+        with c1:
             selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="data_eval_athlete_selector")
             athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
             filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT"], key="data_eval_filter_type")
             search_query = st.text_input("Suche:", key="data_eval_search_input")
 
-        with c_right:
+        with c2:
             st.markdown("##### 👤 Profil")
             stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['id'])
             
             if stats:
-                # Berechnungen
-                ftp = float(stats.get('FTP', 0)) if str(stats.get('FTP')).replace('.','',1).isdigit() else 0
-                weight = float(stats.get('Weight', 0)) if str(stats.get('Weight')).replace('.','',1).isdigit() else 0
+                # Berechnungen (Sicherstellen, dass wir keine String-Fehler haben)
+                ftp_val = stats.get('FTP', 0)
+                ftp = int(ftp_val) if str(ftp_val).replace('.','',1).isdigit() else 0
+                weight_val = stats.get('Weight', 75)
+                weight = float(weight_val) if str(weight_val).replace('.','',1).isdigit() else 75
                 w_kg = round(ftp / weight, 2) if weight > 0 else 0
                 
-                # Wir bauen die Daten direkt ohne Header auf
-                # Spalte 1: Name, Alter, FTP, Max HF
-                # Spalte 2: Datum, Gewicht, W/kg, (leer)
+                # Datenmatrix für die Tabelle
                 data = [
                     [f"{athlete_row['name']}", f"Stand: {datetime.now().strftime('%d.%m.%y')}"],
-                    [f"{stats.get('Age', '-')} Jahre", f"{stats.get('Weight', '-')} kg"],
+                    [f"{stats.get('Age', '-')} Jahre", f"{weight} kg"],
                     [f"FTP: {ftp} W", f"{w_kg} W/kg"],
                     [f"Max HF: {stats.get('Max HR', '-')} bpm", ""]
                 ]
                 
-                # Tabelle ohne Index und ohne Header (mit Leerzeichen als unsichtbarer Spaltenname)
-                st.table(pd.DataFrame(data, columns=[' ', '  ']))
+                # Tabelle ohne Index und ohne Header (zwei verschiedene Leerzeichen als Keys)
+                st.table(pd.DataFrame(data).set_axis([' ', '  '], axis=1))
             else:
                 st.error("Konnte Profildaten nicht laden.")
 
         # --- WORKOUT LOGIK ---
         conn = get_db_connection()
-        df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": int(athlete_row['id'])})
-       
+        uid_val = int(athlete_row['id'])
+        df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": uid_val})
+        
         if df_workouts.empty: 
             st.info(f"Keine Trainingsdaten für {selected_name} gefunden.")
         else:
@@ -407,17 +390,14 @@ elif nav_mode == "Daten & Auswertung":
 
             selected_ids = []
             for idx, row in df_workouts.iterrows():
-                col_check, col_del = st.columns([0.85, 0.15])
-                with col_check:
-                    # Key ist row['id'], das ist sicher einzigartig
-                    if st.checkbox(f"{row['date']} | {row['type']} ({row['structure']}) | {row['filename']}", key=f"eval_check_{row['id']}"):
-                        selected_ids.append(row['id'])
-                with col_del:
-                    if st.button("🗑️", key=f"eval_del_{row['id']}"):
-                        with conn.session as s:
-                            s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": row['id']})
-                            s.commit()
-                        st.rerun()
+                # Eindeutige Keys für Checkboxen
+                if st.checkbox(f"{row['date']} | {row['type']} ({row['structure']}) | {row['filename']}", key=f"eval_check_{row['id']}"):
+                    selected_ids.append(row['id'])
+                if st.button("🗑️", key=f"eval_del_{row['id']}"):
+                    with conn.session as s:
+                        s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": row['id']})
+                        s.commit()
+                    st.rerun()
 
             if len(selected_ids) >= 1:
                 st.markdown("---")
@@ -426,13 +406,12 @@ elif nav_mode == "Daten & Auswertung":
                 
                 if not df_compare.empty:
                     df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
-                    
-                    c1, c2, c3 = st.columns(3)
-                    with c1: 
+                    c_plot1, c_plot2, c_plot3 = st.columns(3)
+                    with c_plot1: 
                         fig1 = px.scatter(df_compare, x="interval_num", y="avg_power", color="Workout", title="Ø Watt")
                         fig1.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
                         st.plotly_chart(fig1, use_container_width=True)
-                    with c2:
+                    with c_plot2:
                         fig_hr = go.Figure()
                         for w in df_compare['Workout'].unique():
                             sub = df_compare[df_compare['Workout'] == w]
@@ -440,8 +419,7 @@ elif nav_mode == "Daten & Auswertung":
                             fig_hr.add_trace(go.Scatter(x=sub['interval_num'], y=sub['avg_hr_p'], name=f"{w} (20-80%)", mode='markers'))
                         fig_hr.update_layout(title="Ø Herzfrequenz", template="plotly_dark")
                         st.plotly_chart(fig_hr, use_container_width=True)
-                    with c3: 
+                    with c_plot3: 
                         fig3 = px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF")
                         fig3.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
                         st.plotly_chart(fig3, use_container_width=True)
-
