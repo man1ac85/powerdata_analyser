@@ -88,20 +88,15 @@ if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_
 if 'df' not in st.session_state: st.session_state['df'] = pd.DataFrame()    
 
 # --- DATENBANK HELFER (PostgreSQL) ---
-def add_new_athlete(name, api_key, password):
-    # Passwort hashen
+def add_new_athlete(name, api_key, password, intervals_id): # <-- Parameter ergänzt
     pwd_hash = hashlib.sha256(password.encode()).hexdigest()
     conn = get_db_connection()
     
-    # Prüfen, ob Name existiert
-    exists = conn.query("SELECT 1 FROM users WHERE name = :name", params={"name": name.strip()})
-    if not exists.empty:
-        return False, "Athlet existiert bereits."
-    
-    # INSERT ohne 'id'
     with conn.session as s:
-        s.execute(text("INSERT INTO users (name, api_key, password_hash, role) VALUES (:name, :api_key, :pwd, 'user')"), 
-                  {"name": name.strip(), "api_key": api_key.strip(), "pwd": pwd_hash})
+        s.execute(text("""
+            INSERT INTO users (name, api_key, password_hash, role, intervals_id) 
+            VALUES (:name, :api_key, :pwd, 'user', :iid)
+        """), {"name": name.strip(), "api_key": api_key.strip(), "pwd": pwd_hash, "iid": intervals_id.strip()})
         s.commit()
     return True, f"Athlet '{name}' angelegt!"
 
