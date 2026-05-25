@@ -16,18 +16,34 @@ from supabase import create_client, Client
 
 # --- DATENBANK & KONFIGURATION ---
 st.set_page_config(page_title="Advanced Power Data Analyser", layout="wide")
-def get_athlete_stats_from_intervals(api_key):
-    # Abfrage der Stammdaten
+def get_athlete_stats_from_intervals(api_key, user_id):
     url = "https://intervals.icu/api/v1/athlete/me/profile"
     response = requests.get(url, auth=HTTPBasicAuth('API_KEY', api_key))
     
     if response.status_code == 200:
         data = response.json().get('athlete', {})
-        # Wir geben ein schönes Dictionary zurück
+        # Mapping der API-Felder
+        api_data = {
+            "ftp": data.get('ftp'),
+            "weight": data.get('weight'),
+            "max_hr": data.get('max_hr')
+        }
+        
+        # Vergleich mit DB & ggf. Update
+        conn = get_db_connection()
+        with conn.session as s:
+            s.execute(text("""
+                UPDATE users 
+                SET ftp = :ftp, weight = :weight, max_hr = :max_hr 
+                WHERE id = :uid
+            """), {"ftp": api_data['ftp'], "weight": api_data['weight'], "max_hr": api_data['max_hr'], "uid": user_id})
+            s.commit()
+            
         return {
             "Name": data.get('name'),
             "Geschlecht": "Weiblich" if data.get('sex') == 'F' else "Männlich",
-            "Ort": f"{data.get('city')}, {data.get('country')}"
+            "Ort": f"{data.get('city')}, {data.get('country')}",
+            **api_data
         }
     return None
 def get_db_connection():
@@ -333,18 +349,33 @@ elif nav_mode == "Daten & Auswertung":
     if authorized_athletes.empty:
         st.warning("Keine Athleten gefunden.")
     else:
-        selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="unique_athlete_selector")
+        # Layout: 4/5 für die Auswahl, 1/5 für das Profil
+        col_main, col_prof = st.columns([4, 1])
+        
+        with col_main:
+            selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="unique_athlete_selector")
+        
         athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
         
-        with st.expander("👤 Athleten-Profil", expanded=True):
-            stats = get_athlete_stats_from_intervals(athlete_row['api_key'])
+        with col_prof:
+            st.markdown("##### 👤 Profil")
+            # Aufruf der aktualisierten Funktion mit user_id für den Sync
+            stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['id'])
+            
             if stats:
-                cols = st.columns(3)
-                cols[0].metric("Name", stats['Name'])
-                cols[1].metric("Geschlecht", stats['Geschlecht'])
-                cols[2].metric("Ort", stats['Ort'])
+                profile_data = {
+                    "Attribut": ["Name", "FTP", "Gewicht", "Max HF"],
+                    "Wert": [
+                        stats.get('Name', '-'), 
+                        f"{stats.get('ftp', '-')} W", 
+                        f"{stats.get('weight', '-')} kg", 
+                        f"{stats.get('max_hr', '-')}"
+                    ]
+                }
+                # st.table sorgt für die kompakte Darstellung
+                st.table(pd.DataFrame(profile_data))
             else:
-                st.error("Konnte Daten nicht laden.")
+                st.error("Konnte Profildaten nicht laden.")
 
         conn = get_db_connection()
         uid_val = int(athlete_row['id'])
@@ -365,7 +396,6 @@ elif nav_mode == "Daten & Auswertung":
             for idx, row in df_workouts.iterrows():
                 col_check, col_del = st.columns([0.85, 0.15])
                 with col_check:
-                    # Der key hier ist wichtig, damit er nicht mit anderen Dingen kollidiert
                     if st.checkbox(f"{row['date']} | {row['type']} ({row['structure']}) | {row['filename']}", key=f"wb_{row['id']}"):
                         selected_ids.append(row['id'])
                 with col_del:
@@ -375,7 +405,8 @@ elif nav_mode == "Daten & Auswertung":
                             s.commit()
                         st.rerun()
 
-            if len(selected_ids) >= 2:
+            # Plotting beginnt bereits ab 1 Datensatz
+            if len(selected_ids) >= 1:
                 st.markdown("---")
                 ids_string = ",".join(map(str, selected_ids))
                 df_compare = conn.query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})")
@@ -399,4 +430,4 @@ elif nav_mode == "Daten & Auswertung":
                     with c3: 
                         fig3 = px.scatter(df_compare, x="interval_num", y="max_hr", color="Workout", title="Max HF")
                         fig3.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
-                        st.plotly_chart(fig3, use_container_width=True)            
+                        st.plotly_chart(fig3, use_container_width=True)
