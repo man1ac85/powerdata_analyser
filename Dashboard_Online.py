@@ -453,31 +453,45 @@ elif nav_mode == "Training einlesen":
     if not df.empty:
         try:
             st.markdown("---")
-            st.subheader("Advanced Intervall Analyzer")
             match_type = re.search(r'(LIT|MIT|HIT|GA|RSH)', filename, re.IGNORECASE)
             detected_type = match_type.group(1).upper() if match_type else "UNKNOWN"
+            is_ride_analysis = detected_type in ["GA", "RSH"]
+            
+            if is_ride_analysis:
+                st.subheader("Advanced Ride Analyser")
+            else:
+                st.subheader("Advanced Intervall Analyzer")
+                
             match_structure = re.search(r'(\d+)[xX](\d+)', filename)
             init_intervals = int(match_structure.group(1)) if match_structure else 4
             init_duration_min = int(match_structure.group(2)) if match_structure else 15
 
             is_admin = st.session_state.get('role') == 'admin'
 
-            col1, col2, col3, _ = st.columns([2, 2, 2, 9])
-            with col1: expected_intervals = st.number_input("Erwartete Anzahl Intervalle", value=init_intervals, min_value=1)
-            with col2: expected_duration_min = st.number_input("Erwartete Intervalllänge (Min)", value=init_duration_min, min_value=1)
-            
-            if is_admin:
-                with col3: mode_type = st.selectbox("Erfassungs-Modus", ["Automatisch (Algorithmus)", "Manuell (Grafische Auswahl)"], key='erfassungs_modus')
+            if not is_ride_analysis:
+                col1, col2, col3, _ = st.columns([2, 2, 2, 9])
+                with col1: expected_intervals = st.number_input("Erwartete Anzahl Intervalle", value=init_intervals, min_value=1)
+                with col2: expected_duration_min = st.number_input("Erwartete Intervalllänge (Min)", value=init_duration_min, min_value=1)
+                
+                if is_admin:
+                    with col3: mode_type = st.selectbox("Erfassungs-Modus", ["Automatisch (Algorithmus)", "Manuell (Grafische Auswahl)"], key='erfassungs_modus')
+                else:
+                    mode_type = "Automatisch (Algorithmus)"
+                
+                if is_admin:
+                    c4, c5, _ = st.columns([1, 1, 2])
+                    with c4: min_power = st.slider("Mindestleistung (Watt)", 50, 400, default_min_power, step=5)
+                    with c5: sg_win = st.slider("Filterfenster", 11, 121, 45, step=2)
+                else:
+                    c4, _ = st.columns([1, 3])
+                    with c4: min_power = st.slider("Mindestleistung (Watt)", 50, 400, default_min_power, step=5)
+                    sg_win = 45
             else:
+                equidistant = st.checkbox("Äquidistant (Gleiche Zeitabschnitte)")
+                expected_intervals = 1
+                expected_duration_min = 60
                 mode_type = "Automatisch (Algorithmus)"
-            
-            if is_admin:
-                c4, c5, _ = st.columns([1, 1, 2])
-                with c4: min_power = st.slider("Mindestleistung (Watt)", 50, 400, default_min_power, step=5)
-                with c5: sg_win = st.slider("Filterfenster", 11, 121, 45, step=2)
-            else:
-                c4, _ = st.columns([1, 3])
-                with c4: min_power = st.slider("Mindestleistung (Watt)", 50, 400, default_min_power, step=5)
+                min_power = default_min_power
                 sg_win = 45
             
             if 'power' in df.columns:
@@ -487,7 +501,25 @@ elif nav_mode == "Training einlesen":
                 # Globaler 30s-Gleitdurchschnitt (WICHTIG für korrekte Intervall-NP!)
                 df['power_roll_30'] = df['p_clean'].rolling(window=30, min_periods=1).mean()
                 
-                if mode_type == "Automatisch (Algorithmus)":
+                if is_ride_analysis:
+                    total_sec = len(df)
+                    if equidistant:
+                        num_chunks = int((total_sec + 1800) // 3600)
+                        if num_chunks < 1: num_chunks = 1
+                        chunk_len = total_sec / num_chunks
+                        df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
+                        df.loc[df['block_id'] > num_chunks, 'block_id'] = num_chunks
+                    else:
+                        chunk_len = 3600
+                        df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
+                        
+                    df['is_interval'] = True
+                    num_intervals = df['block_id'].nunique()
+                    expected_intervals = num_intervals
+                    # Abwechselnd markieren für optische Abgrenzung im Plot
+                    df['highlight'] = df.apply(lambda row: row['power'] if row['block_id'] % 2 != 0 else None, axis=1)
+                    
+                elif mode_type == "Automatisch (Algorithmus)":
                     target = expected_duration_min * 60
                     df['roll'] = df['p_sg'].rolling(window=target, min_periods=int(target*0.5), center=True).mean()
                     scores = df['roll'].fillna(0).values
@@ -504,6 +536,7 @@ elif nav_mode == "Training einlesen":
                     df['is_interval'] = is_interval_array
                     df['block_id'] = block_id_array
                     num_intervals = (df['is_interval'].astype(int).diff() == 1).sum()
+                    df['highlight'] = df.apply(lambda row: row['power'] if row['is_interval'] else None, axis=1)
                 else:
                     df['is_interval'] = False
                     df['block_id'] = 0
@@ -515,20 +548,29 @@ elif nav_mode == "Training einlesen":
                         df.loc[mask, 'block_id'] = current_block_id
                         current_block_id += 1
                     num_intervals = len(st.session_state['manual_intervals'])
-
-                df['highlight'] = df.apply(lambda row: row['power'] if row['is_interval'] else None, axis=1)
+                    df['highlight'] = df.apply(lambda row: row['power'] if row['is_interval'] else None, axis=1)
                 
                 # --- METRIKEN ---
-                workout_structure = f"{expected_intervals}x{expected_duration_min}"
+                if is_ride_analysis:
+                    workout_structure = "Ride"
+                else:
+                    workout_structure = f"{expected_intervals}x{expected_duration_min}"
                 
                 col_m1, col_m2, col_m3, _ = st.columns([1.5, 1.5, 2, 5])
                 col_m1.metric("Ø Leistung Gesamt", f"{int(df['power'].mean())} W")
                 col_m2.metric("Max Leistung", f"{int(df['power'].max())} W")
-                color = "#33CC33" if num_intervals == expected_intervals else "#FF3333"
-                col_m3.markdown(f'''
-                    <div style="font-size: 14px; color: rgb(163, 168, 184);">Intervalle erkannt</div>
-                    <div style="font-size: 2.2rem; font-weight: bold; color: {color}; line-height: 1.2;">{num_intervals} / {expected_intervals}</div>
-                ''', unsafe_allow_html=True)
+                
+                if is_ride_analysis:
+                    col_m3.markdown(f'''
+                        <div style="font-size: 14px; color: rgb(163, 168, 184);">Erfasste Abschnitte</div>
+                        <div style="font-size: 2.2rem; font-weight: bold; color: #33CC33; line-height: 1.2;">{num_intervals}</div>
+                    ''', unsafe_allow_html=True)
+                else:
+                    color = "#33CC33" if num_intervals == expected_intervals else "#FF3333"
+                    col_m3.markdown(f'''
+                        <div style="font-size: 14px; color: rgb(163, 168, 184);">Intervalle erkannt</div>
+                        <div style="font-size: 2.2rem; font-weight: bold; color: {color}; line-height: 1.2;">{num_intervals} / {expected_intervals}</div>
+                    ''', unsafe_allow_html=True)
                 
                 # --- BERECHNUNG DER KENNWERTE UND SPEICHERN ---
                 intervals_calculated = []
@@ -654,7 +696,7 @@ elif nav_mode == "Training einlesen":
                                         if success: st.success(message)
                                         else: st.error(message)
                                     
-                        if mode_type == "Automatisch (Algorithmus)" and is_admin:
+                        if mode_type == "Automatisch (Algorithmus)" and is_admin and not is_ride_analysis:
                             with col_db2:
                                 auto_blocks_timestamps = [(df[df['block_id'] == b].index.min(), df[df['block_id'] == b].index.max()) for b in df[df['is_interval']]['block_id'].unique()]
                                 st.button("Intervalle manuell nachjustieren", on_click=transfer_to_manual, args=(auto_blocks_timestamps,))
@@ -669,7 +711,10 @@ elif nav_mode == "Training einlesen":
                 
                 if 'heart_rate' in df.columns and not df['heart_rate'].isna().all():
                     df['hr_clean'] = df['heart_rate'].ffill().bfill()
-                    df['hr_highlight'] = df.apply(lambda row: row['hr_clean'] if row['is_interval'] else None, axis=1)
+                    if is_ride_analysis:
+                        df['hr_highlight'] = df.apply(lambda row: row['hr_clean'] if row['block_id'] % 2 != 0 else None, axis=1)
+                    else:
+                        df['hr_highlight'] = df.apply(lambda row: row['hr_clean'] if row['is_interval'] else None, axis=1)
                     fig_main.add_trace(go.Scatter(x=df.index, y=df['hr_clean'], mode='lines', name='Herzfrequenz', line=dict(color='rgba(255, 102, 102, 0.5)', width=1.5)), row=2, col=1)
                     fig_main.add_trace(go.Scatter(x=df.index, y=df['hr_highlight'], mode='lines', name='Intervall (HF)', line=dict(color='#FF3333', width=2.5)), row=2, col=1)
                     
@@ -777,6 +822,7 @@ elif nav_mode == "Daten & Auswertung":
             global_color_map = {w: extended_colors[i] for i, w in enumerate(all_possible_workouts)}
 
             selected_ids = []
+            delete_id = None
             for idx, row in df_workouts.iterrows():
                 col_check, col_del = st.columns([0.9, 0.1])
                 with col_check:
@@ -784,10 +830,13 @@ elif nav_mode == "Daten & Auswertung":
                         selected_ids.append(row['id'])
                 with col_del:
                     if st.button("🗑️", key=f"eval_del_{row['id']}"):
-                        with conn.session as s:
-                            s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": row['id']})
-                            s.commit()
-                        st.rerun()
+                        delete_id = row['id']
+                        
+            if delete_id is not None:
+                with conn.session as s:
+                    s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": delete_id})
+                    s.commit()
+                st.rerun()
 
             if len(selected_ids) >= 1:
                 st.markdown("---")
