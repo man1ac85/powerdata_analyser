@@ -117,20 +117,22 @@ def get_supabase_client():
 # --- LOGIN FUNKTION ---
 def check_login(username, password):
     supabase = get_supabase_client()
-    response = supabase.table("users").select("password_hash, role").eq("name", username).execute()
+    response = supabase.table("users").select("id, password_hash, role").eq("name", username).execute()
     if response.data:
         user = response.data[0]
         stored_hash = user['password_hash']
         role = user['role']
+        user_id = user['id']
         input_hash = hashlib.sha256(password.encode()).hexdigest()
         if input_hash == stored_hash:
-            return True, role
-    return False, None
+            return True, role, user_id
+    return False, None, None
 
 # --- SESSION STATES ---
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'role' not in st.session_state: st.session_state['role'] = None
 if 'user' not in st.session_state: st.session_state['user'] = None
+if 'user_id' not in st.session_state: st.session_state['user_id'] = None
 
 # --- LOGIN-TOR ---
 if not st.session_state['logged_in']:
@@ -138,11 +140,12 @@ if not st.session_state['logged_in']:
     user_in = st.text_input("Benutzername")
     pass_in = st.text_input("Passwort", type="password")
     if st.button("Anmelden"):
-        is_valid, role = check_login(user_in, pass_in)
+        is_valid, role, user_id = check_login(user_in, pass_in)
         if is_valid:
             st.session_state['logged_in'] = True
             st.session_state['user'] = user_in
             st.session_state['role'] = role
+            st.session_state['user_id'] = user_id
             st.rerun()
         else: st.error("Benutzername oder Passwort falsch!")
     st.stop()
@@ -151,6 +154,7 @@ if not st.session_state['logged_in']:
 if 'manual_intervals' not in st.session_state: st.session_state['manual_intervals'] = []
 if 'erfassungs_modus' not in st.session_state: st.session_state['erfassungs_modus'] = "Automatisch (Algorithmus)"
 if 'overwrite_warning' not in st.session_state: st.session_state['overwrite_warning'] = False
+if 'interval_mismatch_warning' not in st.session_state: st.session_state['interval_mismatch_warning'] = False
 if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_overwrite'] = None
 if 'df' not in st.session_state: st.session_state['df'] = pd.DataFrame()    
 
@@ -173,8 +177,8 @@ def get_authorized_athletes(current_user_name, role):
         if role == 'admin':
             return conn.query("SELECT * FROM users")
         elif role == 'trainer':
-            return conn.query("SELECT * FROM users WHERE trainer_id = :tid", 
-                              params={"tid": st.session_state.get('user_id')})
+            return conn.query("SELECT * FROM users WHERE trainer_id = :tid OR name = :name", 
+                              params={"tid": st.session_state.get('user_id'), "name": current_user_name})
         else:
             return conn.query("SELECT * FROM users WHERE name = :name", 
                               params={"name": current_user_name})
@@ -193,17 +197,17 @@ def check_duplicate_workout(date, workout_type, structure, user_id=None, interva
     if intervals_activity_id:
         # 1. Höchste Prio: Eindeutige Cloud-ID checken
         result = conn.query("SELECT id FROM workouts WHERE intervals_activity_id = :act_id",
-                            params={"act_id": str(intervals_activity_id)})
+                            params={"act_id": str(intervals_activity_id)}, ttl=0)
         if not result.empty:
             return result.iloc[0]['id']
             
     # 2. Fallback für rein lokale FIT-Dateien (ohne Cloud-ID)
     if user_id:
         result = conn.query("SELECT id FROM workouts WHERE date = :date AND type = :type AND structure = :structure AND user_id = :uid",
-                            params={"date": date, "type": workout_type, "structure": structure, "uid": user_id})
+                            params={"date": date, "type": workout_type, "structure": structure, "uid": user_id}, ttl=0)
     else:
         result = conn.query("SELECT id FROM workouts WHERE date = :date AND type = :type AND structure = :structure AND user_id IS NULL",
-                            params={"date": date, "type": workout_type, "structure": structure})
+                            params={"date": date, "type": workout_type, "structure": structure}, ttl=0)
     return result.iloc[0]['id'] if not result.empty else None
 
 def save_workout_to_db(metadata, interval_list, overwrite_id=None):
@@ -246,6 +250,7 @@ def transfer_to_manual(timestamps):
     st.session_state['manual_intervals'] = timestamps
     st.session_state['erfassungs_modus'] = "Manuell (Grafische Auswahl)"
     st.session_state['overwrite_warning'] = False
+    st.session_state['interval_mismatch_warning'] = False
 
 # --- API CLOUD COCKPIT ---
 def fetch_calendar_events(api_key, start_dt, end_dt):
@@ -273,13 +278,18 @@ if st.session_state.get('logged_in'):
         st.session_state['logged_in'] = False
         st.session_state['user'] = None
         st.session_state['role'] = None
+        st.session_state['user_id'] = None
         st.rerun()
-nav_mode = st.sidebar.radio("Navigation", ["Training einlesen", "Daten & Auswertung", "👤 Athleten verwalten"])
+
+nav_options = ["Training einlesen", "Daten & Auswertung"]
+if st.session_state.get('role') == 'admin':
+    nav_options.append("👤 Athleten verwalten")
+nav_mode = st.sidebar.radio("Navigation", nav_options)
 
 # --- ADMIN-CHECK ---
 if nav_mode == "👤 Athleten verwalten":
     # WICHTIG: Alles ab hier muss eingerückt sein!
-    if st.session_state.get('user') == "Bastian":
+    if st.session_state.get('role') == 'admin':
         st.subheader("🛠️ Admin: Athleten verwalten")
         col_left, col_right = st.columns(2)
         
@@ -318,22 +328,43 @@ if nav_mode == "👤 Athleten verwalten":
 elif nav_mode == "Training einlesen":
     if 'df' not in st.session_state: st.session_state['df'] = pd.DataFrame()
     
-    df_all_users = load_all_athletes()
+    df_all_users = get_authorized_athletes(st.session_state['user'], st.session_state['role'])
     selected_activity_id = None
     filename = ""
     api_k = None
     active_user_id = None
+    default_min_power = 185
 
     st.sidebar.header("👤 Aktiver Athlet")
     options_list = ["Lokal (.fit-Datei)"] + (df_all_users["name"].tolist() if not df_all_users.empty else [])
-    user_select = st.sidebar.selectbox("Wer hat trainiert?", options=options_list, key="user_select_key")
+    
+    default_index = 0
+    if st.session_state['user'] in options_list:
+        default_index = options_list.index(st.session_state['user'])
+        
+    user_select = st.sidebar.selectbox("Wer hat trainiert?", options=options_list, index=default_index, key="user_select_key")
 
     if user_select != "Lokal (.fit-Datei)" and not df_all_users.empty:
         active_user_row = df_all_users.loc[df_all_users["name"] == user_select].iloc[0]
         api_k = active_user_row["api_key"]
         active_user_id = int(active_user_row["id"])
-        start_date = st.sidebar.date_input("Start-Datum", datetime.now() - timedelta(days=60))
-        end_date = st.sidebar.date_input("End-Datum", datetime.now())
+        intervals_id = active_user_row.get("intervals_id", "0")
+        
+        if 'ftp_cache' not in st.session_state: st.session_state['ftp_cache'] = {}
+        if active_user_id not in st.session_state['ftp_cache']:
+            stats = get_athlete_stats_from_intervals(api_k, intervals_id)
+            st.session_state['ftp_cache'][active_user_id] = stats.get("FTP", 0)
+            
+        ftp_val = st.session_state['ftp_cache'][active_user_id]
+        try:
+            if ftp_val and str(ftp_val) != "-":
+                calc_power = int(float(ftp_val) * 0.7)
+                default_min_power = max(50, min(calc_power, 400)) # Zwischen 50 und 400 Watt deckeln
+        except Exception:
+            pass
+
+        start_date = st.sidebar.date_input("Start-Datum", datetime.now() - timedelta(days=60), format="DD.MM.YYYY")
+        end_date = st.sidebar.date_input("End-Datum", datetime.now(), format="DD.MM.YYYY")
         
         with st.spinner("Synchronisiere Aktivitäten..."):
             events, err = fetch_calendar_events(api_k, start_date, end_date)
@@ -347,8 +378,9 @@ elif nav_mode == "Training einlesen":
             except Exception:
                 existing_ids = []
                 
-            st.markdown("### 📋 Cloud-Trainingsübersicht")
-            col_table, col_filter = st.columns([3, 1])
+            st.markdown("### 📋 Intervals.icu Trainingdata")
+            # Dummy-Spalte am Ende fängt den restlichen Platz ab, damit der Filter an die Tabelle heranrückt
+            col_table, col_filter, _ = st.columns([5, 3, 6])
             
             with col_filter:
                 st.markdown("##### 🔍 Filter")
@@ -359,11 +391,14 @@ elif nav_mode == "Training einlesen":
             for e in events:
                 if not e.get("id"): continue
                 ev_name = e.get("name") or "Fahrt"
-                matches_tag = any(tag.lower() in ev_name.lower() for tag in preselected_tags) if preselected_tags else True
+                # Exakte Suche der Tags (Case-Sensitive), um z.B. das Wort "mit" von "MIT" zu unterscheiden
+                matches_tag = any(tag in ev_name for tag in preselected_tags) if preselected_tags else True
                 matches_custom = custom_search.lower() in ev_name.lower() if custom_search else True
                 if matches_tag and matches_custom:
+                    date_raw = e.get("start_date_local", "0000-00-00")[:10]
+                    date_str = f"{date_raw[8:10]}.{date_raw[5:7]}.{date_raw[0:4]}" if len(date_raw) == 10 else date_raw
                     filtered_events.append({
-                        "Datum": e.get("start_date_local", "0000-00-00")[:10], 
+                        "Datum": date_str, 
                         "Name": ev_name,
                         "Status": "In Database" if str(e.get("id")) in existing_ids else "New",
                         "ID": str(e.get("id"))
@@ -373,7 +408,19 @@ elif nav_mode == "Training einlesen":
                 if filtered_events:
                     df_cockpit = pd.DataFrame(filtered_events)
                     # ID-Spalte ausblenden, Status ist sichtbar
-                    sel = st.dataframe(df_cockpit, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True, column_config={"ID": None})
+                    sel = st.dataframe(
+                        df_cockpit, 
+                        use_container_width=False, 
+                        on_select="rerun", 
+                        selection_mode="single-row", 
+                        hide_index=True, 
+                        column_config={
+                            "ID": None,
+                            "Datum": st.column_config.TextColumn("Datum", width=90),
+                            "Name": st.column_config.TextColumn("Name", width=300),
+                            "Status": st.column_config.TextColumn("Status", width=90)
+                        }
+                    )
                     if sel and len(sel.get("selection", {}).get("rows", [])) > 0:
                         idx = sel["selection"]["rows"][0]
                         selected_activity_id = df_cockpit.iloc[idx]["ID"]
@@ -406,21 +453,32 @@ elif nav_mode == "Training einlesen":
     if not df.empty:
         try:
             st.markdown("---")
-            st.subheader("🎯 Intervall-Feinjustierung & Struktur-Editor")
+            st.subheader("Advanced Intervall Analyzer")
             match_type = re.search(r'(LIT|MIT|HIT|GA|RSH)', filename, re.IGNORECASE)
             detected_type = match_type.group(1).upper() if match_type else "UNKNOWN"
             match_structure = re.search(r'(\d+)[xX](\d+)', filename)
             init_intervals = int(match_structure.group(1)) if match_structure else 4
             init_duration_min = int(match_structure.group(2)) if match_structure else 15
 
-            col1, col2, col3 = st.columns(3)
-            with col1: mode_type = st.selectbox("Erfassungs-Modus", ["Automatisch (Algorithmus)", "Manuell (Grafische Auswahl)"], key='erfassungs_modus')
-            with col2: expected_intervals = st.number_input("Erwartete Anzahl Intervalle", value=init_intervals, min_value=1)
-            with col3: expected_duration_min = st.number_input("Erwartete Intervalllänge (Min)", value=init_duration_min, min_value=1)
+            is_admin = st.session_state.get('role') == 'admin'
+
+            col1, col2, col3, _ = st.columns([2, 2, 2, 9])
+            with col1: expected_intervals = st.number_input("Erwartete Anzahl Intervalle", value=init_intervals, min_value=1)
+            with col2: expected_duration_min = st.number_input("Erwartete Intervalllänge (Min)", value=init_duration_min, min_value=1)
             
-            c4, c5 = st.columns(2)
-            with c4: min_power = st.slider("Mindestleistung (Watt)", 50, 400, 185, step=5)
-            with c5: sg_win = st.slider("Filterfenster", 11, 121, 45, step=2)
+            if is_admin:
+                with col3: mode_type = st.selectbox("Erfassungs-Modus", ["Automatisch (Algorithmus)", "Manuell (Grafische Auswahl)"], key='erfassungs_modus')
+            else:
+                mode_type = "Automatisch (Algorithmus)"
+            
+            if is_admin:
+                c4, c5, _ = st.columns([1, 1, 2])
+                with c4: min_power = st.slider("Mindestleistung (Watt)", 50, 400, default_min_power, step=5)
+                with c5: sg_win = st.slider("Filterfenster", 11, 121, 45, step=2)
+            else:
+                c4, _ = st.columns([1, 3])
+                with c4: min_power = st.slider("Mindestleistung (Watt)", 50, 400, default_min_power, step=5)
+                sg_win = 45
             
             if 'power' in df.columns:
                 df['p_clean'] = df['power'].fillna(0)
@@ -461,12 +519,16 @@ elif nav_mode == "Training einlesen":
                 df['highlight'] = df.apply(lambda row: row['power'] if row['is_interval'] else None, axis=1)
                 
                 # --- METRIKEN ---
-                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                workout_structure = f"{expected_intervals}x{expected_duration_min}"
+                
+                col_m1, col_m2, col_m3, _ = st.columns([1.5, 1.5, 2, 5])
                 col_m1.metric("Ø Leistung Gesamt", f"{int(df['power'].mean())} W")
                 col_m2.metric("Max Leistung", f"{int(df['power'].max())} W")
-                workout_structure = f"{expected_intervals}x{expected_duration_min}"
-                col_m3.metric("Gewählte Struktur", workout_structure)
-                col_m4.metric("Intervalle erkannt", f"{num_intervals} / {expected_intervals}")
+                color = "#33CC33" if num_intervals == expected_intervals else "#FF3333"
+                col_m3.markdown(f'''
+                    <div style="font-size: 14px; color: rgb(163, 168, 184);">Intervalle erkannt</div>
+                    <div style="font-size: 2.2rem; font-weight: bold; color: {color}; line-height: 1.2;">{num_intervals} / {expected_intervals}</div>
+                ''', unsafe_allow_html=True)
                 
                 # --- BERECHNUNG DER KENNWERTE UND SPEICHERN ---
                 intervals_calculated = []
@@ -541,10 +603,10 @@ elif nav_mode == "Training einlesen":
                     
                     st.markdown("### Speichern")
                     if st.session_state.get('overwrite_warning'):
-                        st.warning(f"Achtung: Workout vom {workout_date} existiert bereits.")
+                        st.warning("Workout ist bereits in der Datenbank. Überschreiben?")
                         col_w1, col_w2 = st.columns([1, 3])
                         with col_w1:
-                            if st.button("Trotzdem überschreiben", type="primary"):
+                            if st.button("Ja", type="primary"):
                                 success, msg = save_workout_to_db(metadata, intervals_calculated, overwrite_id=st.session_state['workout_to_overwrite'])
                                 if success: 
                                     st.success(msg)
@@ -552,13 +614,15 @@ elif nav_mode == "Training einlesen":
                                 else:
                                     st.error(msg)
                         with col_w2:
-                            if st.button("Abbrechen"): 
+                            if st.button("Abbrechen & Zurück"): 
                                 st.session_state['overwrite_warning'] = False
                                 st.rerun()
-                    else:
-                        col_db1, col_db2 = st.columns([1, 3])
-                        with col_db1:
-                            if st.button("In Datenbank übernehmen"):
+                    elif st.session_state.get('interval_mismatch_warning'):
+                        st.warning(f"Achtung: Es wurden {num_intervals} Intervalle erkannt, aber {expected_intervals} erwartet. Trotzdem speichern?")
+                        col_w1, col_w2 = st.columns([1, 3])
+                        with col_w1:
+                            if st.button("Ja", type="primary", key="btn_yes_mismatch"):
+                                st.session_state['interval_mismatch_warning'] = False
                                 dup_id = check_duplicate_workout(workout_date, detected_type, workout_structure, active_user_id, selected_activity_id)
                                 if dup_id: 
                                     st.session_state['overwrite_warning'] = True
@@ -568,15 +632,37 @@ elif nav_mode == "Training einlesen":
                                     success, message = save_workout_to_db(metadata, intervals_calculated)
                                     if success: st.success(message)
                                     else: st.error(message)
+                        with col_w2:
+                            if st.button("Abbrechen & Zurück", key="btn_no_mismatch"): 
+                                st.session_state['interval_mismatch_warning'] = False
+                                st.rerun()
+                    else:
+                        col_db1, col_db2 = st.columns([1, 3])
+                        with col_db1:
+                            if st.button("In Datenbank übernehmen"):
+                                if num_intervals != expected_intervals:
+                                    st.session_state['interval_mismatch_warning'] = True
+                                    st.rerun()
+                                else:
+                                    dup_id = check_duplicate_workout(workout_date, detected_type, workout_structure, active_user_id, selected_activity_id)
+                                    if dup_id: 
+                                        st.session_state['overwrite_warning'] = True
+                                        st.session_state['workout_to_overwrite'] = dup_id
+                                        st.rerun()
+                                    else: 
+                                        success, message = save_workout_to_db(metadata, intervals_calculated)
+                                        if success: st.success(message)
+                                        else: st.error(message)
                                     
-                        if mode_type == "Automatisch (Algorithmus)":
+                        if mode_type == "Automatisch (Algorithmus)" and is_admin:
                             with col_db2:
                                 auto_blocks_timestamps = [(df[df['block_id'] == b].index.min(), df[df['block_id'] == b].index.max()) for b in df[df['is_interval']]['block_id'].unique()]
                                 st.button("Intervalle manuell nachjustieren", on_click=transfer_to_manual, args=(auto_blocks_timestamps,))
 
                 # PLOTLY GRAPH (Full subplots)
                 st.subheader("Trainingsdaten & Analyse")
-                fig_main = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04)
+                num_rows = 3 if is_admin else 2
+                fig_main = make_subplots(rows=num_rows, cols=1, shared_xaxes=True, vertical_spacing=0.04)
                 fig_main.add_trace(go.Scatter(x=df.index, y=df['power'], mode='lines', name='Rohleistung', line=dict(color='rgba(150, 150, 150, 0.4)', width=1)), row=1, col=1)
                 fig_main.add_trace(go.Scatter(x=df.index, y=df['p_sg'], mode='lines', name='Sav-Gol Trend', line=dict(color='rgba(51, 153, 255, 0.6)', width=1)), row=1, col=1)
                 fig_main.add_trace(go.Scatter(x=df.index, y=df['highlight'], mode='lines', name='Intervall (Power)', line=dict(color='#FFA500', width=2.5)), row=1, col=1)
@@ -587,10 +673,12 @@ elif nav_mode == "Training einlesen":
                     fig_main.add_trace(go.Scatter(x=df.index, y=df['hr_clean'], mode='lines', name='Herzfrequenz', line=dict(color='rgba(255, 102, 102, 0.5)', width=1.5)), row=2, col=1)
                     fig_main.add_trace(go.Scatter(x=df.index, y=df['hr_highlight'], mode='lines', name='Intervall (HF)', line=dict(color='#FF3333', width=2.5)), row=2, col=1)
                     
-                df['p_deriv'] = savgol_filter(df['p_clean'].rolling(7, center=True, min_periods=1).median(), window_length=sg_win, polyorder=2, deriv=1)
-                fig_main.add_trace(go.Scatter(x=df.index, y=df['p_deriv'], mode='lines', name='Steigung (Ableitung)', line=dict(color='#33CC33', width=1.2)), row=3, col=1)
+                if is_admin:
+                    df['p_deriv'] = savgol_filter(df['p_clean'].rolling(7, center=True, min_periods=1).median(), window_length=sg_win, polyorder=2, deriv=1)
+                    fig_main.add_trace(go.Scatter(x=df.index, y=df['p_deriv'], mode='lines', name='Steigung (Ableitung)', line=dict(color='#33CC33', width=1.2)), row=3, col=1)
 
-                fig_main.update_layout(template="plotly_dark", height=800, hovermode="x unified", margin=dict(l=0, r=0, t=20, b=0), legend=dict(yanchor="top", y=1))
+                plot_height = 800 if is_admin else 550
+                fig_main.update_layout(template="plotly_dark", height=plot_height, hovermode="x unified", margin=dict(l=0, r=0, t=20, b=0), legend=dict(yanchor="top", y=1))
                 selected_data = st.plotly_chart(fig_main, use_container_width=True, on_select="rerun")
                 
                 if mode_type == "Manuell (Grafische Auswahl)":
