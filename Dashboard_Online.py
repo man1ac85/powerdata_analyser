@@ -16,6 +16,7 @@ from supabase import create_client, Client
 
 # --- DATENBANK & KONFIGURATION ---
 st.set_page_config(page_title="Advanced Power Data Analyser", layout="wide")
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_athlete_stats_from_intervals(api_key, athlete_id):
     auth = HTTPBasicAuth('API_KEY', api_key)
     
@@ -169,27 +170,27 @@ def add_new_athlete(name, api_key, password, intervals_id): # <-- Parameter erg�
             VALUES (:name, :api_key, :pwd, 'user', :iid)
         """), {"name": name.strip(), "api_key": api_key.strip(), "pwd": pwd_hash, "iid": intervals_id.strip()})
         s.commit()
+    st.cache_data.clear()
     return True, f"Athlet '{name}' angelegt!"
 
-def get_authorized_athletes(current_user_name, role):
+@st.cache_data(ttl=300, show_spinner=False)
+def get_authorized_athletes(current_user_name, role, user_id):
     conn = get_db_connection()
     try:
         if role == 'admin':
-            return conn.query("SELECT * FROM users")
+            return conn.query("SELECT * FROM users", ttl=0)
         elif role == 'trainer':
             return conn.query("SELECT * FROM users WHERE trainer_id = :tid OR name = :name", 
-                              params={"tid": st.session_state.get('user_id'), "name": current_user_name})
+                              params={"tid": user_id, "name": current_user_name}, ttl=0)
         else:
             return conn.query("SELECT * FROM users WHERE name = :name", 
-                              params={"name": current_user_name})
+                              params={"name": current_user_name}, ttl=0)
     except Exception as e:
         st.error(f"Datenbankfehler in get_authorized_athletes: {e}")
         return pd.DataFrame() # Leeres DataFrame zurückgeben bei Fehler
         
 def load_all_athletes():
-    conn = get_db_connection()
-    # Wir nehmen alle User aus der Tabelle, um sie in der Liste anzuzeigen
-    return conn.query("SELECT * FROM users")
+    return get_authorized_athletes(st.session_state['user'], 'admin', st.session_state.get('user_id'))
 
 def check_duplicate_workout(date, workout_type, structure, user_id=None, intervals_activity_id=None):
     conn = get_db_connection()
@@ -234,17 +235,30 @@ def save_workout_to_db(metadata, interval_list, overwrite_id=None):
             """), {
                 "wid": int(workout_id),
                 "num": int(row['Intervall']),
-                "ap": float(row['Ø Leistung']),
-                "ahr": float(row['Ø Herzfrequenz']),
-                "mhr": float(row['Max Herzfrequenz']),
+                "ap": float(row['Ø Watt']),
+                "ahr": float(row['Ø HF']),
+                "mhr": float(row['Max HF']),
                 "dur": int(row['Dauer_sec']),
-                "std": float(row['Abweichung HF+-']),
-                "ahrp": float(row['Durschnittliche HF_P (20-80)']),
+                "std": float(row['Δ HF+-']),
+                "ahrp": float(row['Ø HF_P (20-80)']),
                 "np": float(row['NP']),
                 "eff": float(row['Efficiency'])
             })
         s.commit()
+    st.cache_data.clear()
     return True, "Daten erfolgreich in die Datenbank übernommen."
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_workouts_from_db(uid_val):
+    conn = get_db_connection()
+    return conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": uid_val}, ttl=0)
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_compare_from_db(selected_ids):
+    if not selected_ids: return pd.DataFrame()
+    conn = get_db_connection()
+    ids_string = ",".join(map(str, selected_ids))
+    return conn.query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})", ttl=0)
 
 def transfer_to_manual(timestamps):
     st.session_state['manual_intervals'] = timestamps
@@ -253,6 +267,7 @@ def transfer_to_manual(timestamps):
     st.session_state['interval_mismatch_warning'] = False
 
 # --- API CLOUD COCKPIT ---
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_calendar_events(api_key, start_dt, end_dt):
     url = "https://intervals.icu/api/v1/athlete/0/activities"
     params = {"oldest": start_dt.strftime('%Y-%m-%d'), "newest": end_dt.strftime('%Y-%m-%d')}
@@ -262,6 +277,7 @@ def fetch_calendar_events(api_key, start_dt, end_dt):
         return None, f"Fehler {response.status_code}"
     except Exception as e: return None, str(e)
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def download_original_fit_file(api_key, activity_id):
     url = f"https://intervals.icu/api/v1/activity/{activity_id}/file"
     try:
@@ -320,6 +336,7 @@ if nav_mode == "👤 Athleten verwalten":
                     with conn.session as s:
                         s.execute(text("DELETE FROM users WHERE name = :name"), {"name": del_name})
                         s.commit()
+                    st.cache_data.clear()
                     st.success(f"Athlet {del_name} wurde gelöscht.")
                     st.rerun()
     else:
@@ -328,10 +345,11 @@ if nav_mode == "👤 Athleten verwalten":
 elif nav_mode == "Training einlesen":
     if 'df' not in st.session_state: st.session_state['df'] = pd.DataFrame()
     
-    df_all_users = get_authorized_athletes(st.session_state['user'], st.session_state['role'])
+    df_all_users = get_authorized_athletes(st.session_state['user'], st.session_state['role'], st.session_state.get('user_id'))
     selected_activity_id = None
     filename = ""
     api_k = None
+    ftp_val = 0
     active_user_id = None
     default_min_power = 185
 
@@ -469,14 +487,17 @@ elif nav_mode == "Training einlesen":
             is_admin = st.session_state.get('role') == 'admin'
 
             if not is_ride_analysis:
-                col1, col2, col3, _ = st.columns([2, 2, 2, 9])
+                if is_admin:
+                    col1, col2, col3, col_int, _ = st.columns([2, 2, 2, 2, 7])
+                    with col3: mode_type = st.selectbox("Erfassungs-Modus", ["Automatisch (Algorithmus)", "Manuell (Grafische Auswahl)"], key='erfassungs_modus')
+                else:
+                    col1, col2, col_int, _ = st.columns([2, 2, 2, 9])
+                    mode_type = "Automatisch (Algorithmus)"
+                
                 with col1: expected_intervals = st.number_input("Erwartete Anzahl Intervalle", value=init_intervals, min_value=1)
                 with col2: expected_duration_min = st.number_input("Erwartete Intervalllänge (Min)", value=init_duration_min, min_value=1)
                 
-                if is_admin:
-                    with col3: mode_type = st.selectbox("Erfassungs-Modus", ["Automatisch (Algorithmus)", "Manuell (Grafische Auswahl)"], key='erfassungs_modus')
-                else:
-                    mode_type = "Automatisch (Algorithmus)"
+                interval_placeholder = col_int.empty()
                 
                 if is_admin:
                     c4, c5, _ = st.columns([1, 1, 2])
@@ -556,21 +577,48 @@ elif nav_mode == "Training einlesen":
                 else:
                     workout_structure = f"{expected_intervals}x{expected_duration_min}"
                 
-                col_m1, col_m2, col_m3, _ = st.columns([1.5, 1.5, 2, 5])
-                col_m1.metric("Ø Leistung Gesamt", f"{int(df['power'].mean())} W")
-                col_m2.metric("Max Leistung", f"{int(df['power'].max())} W")
+                mean_p = df['power'].mean() if not df['power'].empty else 0
+                overall_avg_p = int(mean_p) if pd.notna(mean_p) else 0
                 
-                if is_ride_analysis:
-                    col_m3.markdown(f'''
-                        <div style="font-size: 14px; color: rgb(163, 168, 184);">Erfasste Abschnitte</div>
-                        <div style="font-size: 2.2rem; font-weight: bold; color: #33CC33; line-height: 1.2;">{num_intervals}</div>
-                    ''', unsafe_allow_html=True)
+                max_p = df['power'].max() if not df['power'].empty else 0
+                overall_max_p = int(max_p) if pd.notna(max_p) else 0
+                
+                if 'power_roll_30' in df.columns and not df.empty:
+                    mean_p4 = (df['power_roll_30'] ** 4).mean()
+                    overall_np = int(mean_p4 ** 0.25) if pd.notna(mean_p4) else 0
                 else:
+                    overall_np = 0
+                
+                if 'heart_rate' in df.columns and not df['heart_rate'].dropna().empty:
+                    mean_hr = df['heart_rate'].mean()
+                    overall_avg_hr = int(mean_hr) if pd.notna(mean_hr) else 0
+                    max_hr = df['heart_rate'].max()
+                    overall_max_hr = int(max_hr) if pd.notna(max_hr) else 0
+                else:
+                    overall_avg_hr = 0
+                    overall_max_hr = 0
+                    
+                ftp_for_tss = float(ftp_val) if ftp_val and str(ftp_val) != "-" else 250
+                overall_tss = int((len(df) * (overall_np ** 2)) / ((ftp_for_tss ** 2) * 36)) if ftp_for_tss > 0 else 0
+
+                st.markdown("""
+                <style>
+                .small-metric { font-size: 1.65rem !important; font-weight: bold; line-height: 1.2; }
+                .small-metric-label { font-size: 14px; color: rgb(163, 168, 184); margin-bottom: 2px; }
+                </style>
+                """, unsafe_allow_html=True)
+
+                cols = st.columns(6)
+                cols[0].markdown(f'<div class="small-metric-label">Ø Leistung</div><div class="small-metric">{overall_avg_p} W</div>', unsafe_allow_html=True)
+                cols[1].markdown(f'<div class="small-metric-label">Normalized Power</div><div class="small-metric">{overall_np} W</div>', unsafe_allow_html=True)
+                cols[2].markdown(f'<div class="small-metric-label">Max Leistung</div><div class="small-metric">{overall_max_p} W</div>', unsafe_allow_html=True)
+                cols[3].markdown(f'<div class="small-metric-label">Ø HF</div><div class="small-metric">{overall_avg_hr} bpm</div>', unsafe_allow_html=True)
+                cols[4].markdown(f'<div class="small-metric-label">Max HF</div><div class="small-metric">{overall_max_hr} bpm</div>', unsafe_allow_html=True)
+                cols[5].markdown(f'<div class="small-metric-label">TSS Score</div><div class="small-metric">{overall_tss}</div>', unsafe_allow_html=True)
+                
+                if not is_ride_analysis:
                     color = "#33CC33" if num_intervals == expected_intervals else "#FF3333"
-                    col_m3.markdown(f'''
-                        <div style="font-size: 14px; color: rgb(163, 168, 184);">Intervalle erkannt</div>
-                        <div style="font-size: 2.2rem; font-weight: bold; color: {color}; line-height: 1.2;">{num_intervals} / {expected_intervals}</div>
-                    ''', unsafe_allow_html=True)
+                    interval_placeholder.markdown(f'<div style="font-size: 14px; color: rgb(163, 168, 184); margin-bottom: 2px;">Intervalle erkannt</div><div style="font-size: 1.65rem; font-weight: bold; line-height: 1.2; color: {color};">{num_intervals} / {expected_intervals}</div>', unsafe_allow_html=True)
                 
                 # --- BERECHNUNG DER KENNWERTE UND SPEICHERN ---
                 intervals_calculated = []
@@ -607,26 +655,26 @@ elif nav_mode == "Training einlesen":
                             
                         intervals_calculated.append({
                             "Intervall": idx, 
-                            "Ø Leistung": avg_p, 
-                            "Ø Herzfrequenz": avg_hr, 
+                            "Ø Watt": avg_p, 
+                            "Ø HF": avg_hr, 
                             "Efficiency": round(efficiency, 2),
                             "NP": round(np_val, 1),
-                            "Max Herzfrequenz": max_hr, 
-                            "Abweichung HF+-": std_hr, 
-                            "Durschnittliche HF_P (20-80)": avg_hr_p, 
+                            "Max HF": max_hr, 
+                            "Δ HF+-": std_hr, 
+                            "Ø HF_P (20-80)": avg_hr_p, 
                             "Dauer (Min)": round(len(block_df) / 60, 2),
                             "Dauer_sec": len(block_df) 
                         })
                 
                 if intervals_calculated:
                     st.subheader("Kennwerte pro Intervall")
-                    col_tab1, col_tab2 = st.columns([1, 1])
+                    col_tab1, col_tab2 = st.columns([2, 1])
                     with col_tab1:
                         df_res = pd.DataFrame(intervals_calculated)
                         display_df = df_res.drop(columns=['Dauer_sec'])
                         styled_df = display_df.style.format({
-                            "Ø Leistung": "{:.0f}", "Ø Herzfrequenz": "{:.0f}", "Efficiency": "{:.2f}", "NP": "{:.1f}",
-                            "Max Herzfrequenz": "{:.0f}", "Abweichung HF+-": "{:.1f}", "Durschnittliche HF_P (20-80)": "{:.0f}", "Dauer (Min)": "{:.1f}"
+                            "Ø Watt": "{:.0f}", "Ø HF": "{:.0f}", "Efficiency": "{:.2f}", "NP": "{:.1f}",
+                            "Max HF": "{:.0f}", "Δ HF+-": "{:.1f}", "Ø HF_P (20-80)": "{:.0f}", "Dauer (Min)": "{:.1f}"
                         }).set_properties(**{'text-align': 'center'}).set_table_styles([{'selector': 'th', 'props': [('text-align', 'center')]}])
                         st.dataframe(styled_df, use_container_width=True, hide_index=True)
                     
@@ -705,9 +753,9 @@ elif nav_mode == "Training einlesen":
                 st.subheader("Trainingsdaten & Analyse")
                 num_rows = 3 if is_admin else 2
                 fig_main = make_subplots(rows=num_rows, cols=1, shared_xaxes=True, vertical_spacing=0.04)
-                fig_main.add_trace(go.Scatter(x=df.index, y=df['power'], mode='lines', name='Rohleistung', line=dict(color='rgba(150, 150, 150, 0.4)', width=1)), row=1, col=1)
-                fig_main.add_trace(go.Scatter(x=df.index, y=df['p_sg'], mode='lines', name='Sav-Gol Trend', line=dict(color='rgba(51, 153, 255, 0.6)', width=1)), row=1, col=1)
-                fig_main.add_trace(go.Scatter(x=df.index, y=df['highlight'], mode='lines', name='Intervall (Power)', line=dict(color='#FFA500', width=2.5)), row=1, col=1)
+                fig_main.add_trace(go.Scatter(x=df.index, y=df.get('power'), mode='lines', name='Rohleistung', line=dict(color='rgba(150, 150, 150, 0.4)', width=1)), row=1, col=1)
+                fig_main.add_trace(go.Scatter(x=df.index, y=df.get('p_sg'), mode='lines', name='Sav-Gol Trend', line=dict(color='rgba(51, 153, 255, 0.6)', width=1)), row=1, col=1)
+                fig_main.add_trace(go.Scatter(x=df.index, y=df.get('highlight'), mode='lines', name='Intervall (Power)', line=dict(color='#FFA500', width=2.5)), row=1, col=1)
                 
                 if 'heart_rate' in df.columns and not df['heart_rate'].isna().all():
                     df['hr_clean'] = df['heart_rate'].ffill().bfill()
@@ -720,7 +768,7 @@ elif nav_mode == "Training einlesen":
                     
                 if is_admin:
                     df['p_deriv'] = savgol_filter(df['p_clean'].rolling(7, center=True, min_periods=1).median(), window_length=sg_win, polyorder=2, deriv=1)
-                    fig_main.add_trace(go.Scatter(x=df.index, y=df['p_deriv'], mode='lines', name='Steigung (Ableitung)', line=dict(color='#33CC33', width=1.2)), row=3, col=1)
+                    fig_main.add_trace(go.Scatter(x=df.index, y=df.get('p_deriv'), mode='lines', name='Steigung (Ableitung)', line=dict(color='#33CC33', width=1.2)), row=3, col=1)
 
                 plot_height = 800 if is_admin else 550
                 fig_main.update_layout(template="plotly_dark", height=plot_height, hovermode="x unified", margin=dict(l=0, r=0, t=20, b=0), legend=dict(yanchor="top", y=1))
@@ -758,7 +806,7 @@ elif nav_mode == "Training einlesen":
 elif nav_mode == "Daten & Auswertung":
     st.subheader("📊 Daten & Auswertung")
     
-    authorized_athletes = get_authorized_athletes(st.session_state['user'], st.session_state['role'])
+    authorized_athletes = get_authorized_athletes(st.session_state['user'], st.session_state['role'], st.session_state.get('user_id'))
     
     if authorized_athletes.empty:
         st.warning("Keine Athleten gefunden.")
@@ -801,10 +849,8 @@ elif nav_mode == "Daten & Auswertung":
             st.table(profile_df.set_axis([' ', '  '], axis=1))
 
         # --- WORKOUT LOGIK ---
-        conn = get_db_connection()
         uid_val = int(athlete_row['id'])
-        # ttl=0 ist wichtig, da Streamlit ansonsten den alten Stand zwischenspeichert und das Löschen nicht sofort sichtbar ist!
-        df_workouts = conn.query("SELECT * FROM workouts WHERE user_id = :uid", params={"uid": uid_val}, ttl=0)
+        df_workouts = fetch_workouts_from_db(uid_val)
         
         if df_workouts.empty: 
             st.info(f"Keine Trainingsdaten für {selected_name} gefunden.")
@@ -833,16 +879,16 @@ elif nav_mode == "Daten & Auswertung":
                         delete_id = row['id']
                         
             if delete_id is not None:
+                conn = get_db_connection()
                 with conn.session as s:
                     s.execute(text("DELETE FROM workouts WHERE id = :id"), {"id": delete_id})
                     s.commit()
+                st.cache_data.clear()
                 st.rerun()
 
             if len(selected_ids) >= 1:
                 st.markdown("---")
-                ids_string = ",".join(map(str, selected_ids))
-                # ttl=0 ist wichtig, da Streamlit sonst leere Dataframes aus der Vergangenheit zwischenspeichert!
-                df_compare = conn.query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})", ttl=0)
+                df_compare = fetch_compare_from_db(selected_ids)
                 
                 if not df_compare.empty:
                     df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
