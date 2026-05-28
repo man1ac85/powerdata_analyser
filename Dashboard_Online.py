@@ -115,7 +115,7 @@ def check_login(username, password):
     if not result.empty:
         user = result.iloc[0]
         stored_hash = user['password_hash']
-        role = user['role']
+        role = str(user['role']).lower().strip() if user['role'] else 'user'
         user_id = int(user['id'])
         input_hash = hashlib.sha256(password.encode()).hexdigest()
         if input_hash == stored_hash:
@@ -166,15 +166,20 @@ def add_new_athlete(name, api_key, password, intervals_id): # <-- Parameter ergÃ
     st.cache_data.clear()
     return True, f"Athlet '{name}' angelegt!"
 
-@st.cache_data(ttl=300, show_spinner=False)
 def get_authorized_athletes(current_user_name, role, user_id):
     conn = get_db_connection()
     try:
         if role == 'admin':
             return conn.query("SELECT * FROM users", ttl=0)
         elif role == 'trainer':
-            return conn.query("SELECT * FROM users WHERE trainer_id = :tid OR name = :name", 
-                              params={"tid": user_id, "name": current_user_name}, ttl=0)
+            try:
+                # Versuche die trainer_id Spalte abzufragen
+                return conn.query("SELECT * FROM users WHERE trainer_id = :tid OR name = :name", 
+                                  params={"tid": user_id, "name": current_user_name}, ttl=0)
+            except Exception:
+                # Fallback, falls die Spalte 'trainer_id' gar nicht in der Tabelle existiert
+                return conn.query("SELECT * FROM users WHERE name = :name", 
+                                  params={"name": current_user_name}, ttl=0)
         else:
             return conn.query("SELECT * FROM users WHERE name = :name", 
                               params={"name": current_user_name}, ttl=0)
