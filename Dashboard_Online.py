@@ -12,7 +12,6 @@ import hashlib
 import requests
 from requests.auth import HTTPBasicAuth
 from sqlalchemy import text
-from supabase import create_client, Client
 
 # --- DATENBANK & KONFIGURATION ---
 st.set_page_config(page_title="Advanced Power Data Analyser", layout="wide")
@@ -109,21 +108,15 @@ def get_db_connection():
     # Streamlit connection (nutzt automatisch psycopg3, wenn in requirements.txt)
     return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
 
-@st.cache_resource
-def get_supabase_client():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
-
 # --- LOGIN FUNKTION ---
 def check_login(username, password):
-    supabase = get_supabase_client()
-    response = supabase.table("users").select("id, password_hash, role").eq("name", username).execute()
-    if response.data:
-        user = response.data[0]
+    conn = get_db_connection()
+    result = conn.query("SELECT id, password_hash, role FROM users WHERE name = :name", params={"name": username}, ttl=0)
+    if not result.empty:
+        user = result.iloc[0]
         stored_hash = user['password_hash']
         role = user['role']
-        user_id = user['id']
+        user_id = int(user['id'])
         input_hash = hashlib.sha256(password.encode()).hexdigest()
         if input_hash == stored_hash:
             return True, role, user_id
