@@ -149,6 +149,12 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
             st.session_state['erfassungs_modus'] = "Automatisch (Algorithmus)"
             is_new_workout = True
             
+            # Reset UI-Regler bei neuem Workout
+            if f"ui_int_{key_suffix}" in st.session_state:
+                del st.session_state[f"ui_int_{key_suffix}"]
+            if f"ui_dur_{key_suffix}" in st.session_state:
+                del st.session_state[f"ui_dur_{key_suffix}"]
+
             if explicit_type:
                 st.session_state[f"type_{key_suffix}"] = explicit_type
 
@@ -168,6 +174,11 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
             name_duration_min = int(match_structure.group(2)) if match_structure else None
             expected_intervals = name_intervals if name_intervals else 0
             expected_duration_min = name_duration_min if name_duration_min else 0
+
+        target_intervals = st.session_state.get(f"ui_int_{key_suffix}")
+        target_duration = st.session_state.get(f"ui_dur_{key_suffix}")
+        if target_intervals is None: target_intervals = expected_intervals
+        if target_duration is None: target_duration = expected_duration_min
 
         if f"type_{key_suffix}" in st.session_state:
             detected_type = st.session_state[f"type_{key_suffix}"]
@@ -322,6 +333,20 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                         cv = np.std(durations) / np.mean(durations) if len(durations) > 1 else 0
                         score = len(current_intervals) * (1 - cv)
                         
+                        # Algorithmus an User-Regler koppeln
+                        if target_intervals and target_intervals > 0 and not match_4020:
+                            count_diff = abs(len(current_intervals) - target_intervals)
+                            if count_diff == 0:
+                                score += 1000 # Massiver Boost, wenn die Anzahl exakt stimmt!
+                            else:
+                                score -= count_diff * 10
+                                
+                        if target_duration and target_duration > 0 and not match_4020:
+                            target_sec = target_duration * 60
+                            avg_dur = np.mean(durations)
+                            if abs(avg_dur - target_sec) > (target_sec * 0.3):
+                                score -= 50
+
                         if score > best_score:
                             best_score = score
                             best_intervals = current_intervals
@@ -331,6 +356,17 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                 st.session_state[f'best_thresh_pos_{key_suffix}'] = best_thresh_pos
                 st.session_state[f'best_thresh_neg_{key_suffix}'] = best_thresh_neg
                 
+                # Wenn Algorithmus zu viele Intervalle findet, die Schwächsten verwerfen
+                if best_intervals and target_intervals and target_intervals > 0 and not match_4020:
+                    if len(best_intervals) > target_intervals:
+                        scored_intervals = []
+                        for sp, ep in best_intervals:
+                            mean_p = df['p_clean'].iloc[sp:ep+1].mean()
+                            scored_intervals.append((mean_p, sp, ep))
+                        scored_intervals.sort(key=lambda x: x[0], reverse=True)
+                        best_intervals = [(sp, ep) for _, sp, ep in scored_intervals[:target_intervals]]
+                        best_intervals.sort(key=lambda x: x[0])
+
                 interval_nums = {}
                 if best_intervals:
                     macro_blocks = []
@@ -542,7 +578,22 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                             
                         avg_dur_sec = st.session_state.get(f'auto_dur_sec_{key_suffix}', 0)
                         exact_dur_display = f"{int(avg_dur_sec // 60):02d}:{int(avg_dur_sec % 60):02d} mm:ss"
-                        st.markdown(f'<div style="font-size: 14px; color: rgb(163, 168, 184); margin-bottom: 2px;">Intervalle erkannt ({status_text})</div><div style="font-size: 1.65rem; font-weight: bold; line-height: 1.2; color: {color};">{expected_intervals}x {expected_duration_min} Min <span style="font-size: 1rem; font-weight: normal; color: #a3a8b8;">(Ø {exact_dur_display})</span></div>', unsafe_allow_html=True)
+                        st.markdown(f'<div style="font-size: 14px; color: rgb(163, 168, 184); margin-bottom: 2px;">Intervalle ({status_text} | Ø {exact_dur_display})</div>', unsafe_allow_html=True)
+                        
+                        if f"ui_int_{key_suffix}" not in st.session_state:
+                            st.session_state[f"ui_int_{key_suffix}"] = int(expected_intervals if expected_intervals > 0 else 1)
+                        if f"ui_dur_{key_suffix}" not in st.session_state:
+                            st.session_state[f"ui_dur_{key_suffix}"] = int(expected_duration_min if expected_duration_min > 0 else 1)
+                            
+                        cc1, cc2 = st.columns(2)
+                        with cc1:
+                            ui_intervals = st.number_input("Anzahl", min_value=1, step=1, key=f"ui_int_{key_suffix}")
+                        with cc2:
+                            ui_duration = st.number_input("Dauer (Min)", min_value=1, step=1, key=f"ui_dur_{key_suffix}")
+                            
+                        expected_intervals = ui_intervals
+                        expected_duration_min = ui_duration
+                        workout_structure = f"{expected_intervals}x{expected_duration_min}"
                 else:
                     st.markdown(f'<div style="font-size: 14px; color: rgb(163, 168, 184); margin-bottom: 2px;">Modus</div><div style="font-size: 1.65rem; font-weight: bold; line-height: 1.2; color: #3399FF;">Ride Analysis</div>', unsafe_allow_html=True)
             
@@ -1106,6 +1157,10 @@ if len(tabs) > 4:
                                 if ev_type not in ["Ride", "VirtualRide", "IndoorRide"]: continue
                                 
                                 ev_name = e.get("name") or "Fahrt"
+                                
+                                # Laktattests / Tests beim Bulk-Import ignorieren
+                                if any(kw in ev_name.lower() for kw in ["test", "laktat", "lactate"]):
+                                    continue
                                 
                                 matches_tag = False
                                 if not b_tags: matches_tag = True
