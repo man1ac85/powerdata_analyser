@@ -159,7 +159,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                 st.session_state[f"type_{key_suffix}"] = explicit_type
 
         match_4020 = re.search(r'(\d+)[xX](\d+)[xX]40/20', filename, re.IGNORECASE)
-        match_structure = re.search(r'(\d+)[xX](\d+)', filename)
+        match_structure = re.search(r'(\d+)\s*[xX]\s*(\d+)', filename)
 
         if match_4020:
             name_blocks = int(match_4020.group(1))
@@ -222,17 +222,17 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
 
         if not is_ride_analysis:
             if is_admin:
-                c1, c2, c3, _ = st.columns([1, 1, 1, 3])
+                c1, c2, c3, _ = st.columns([0.5, 0.5, 0.5, 4.5])
                 with c1: min_power = st.slider("Mindestleistung (Watt)", 50, 400, default_min_power, step=5, key=f"min_p_{key_suffix}")
                 with c2: sg_win = st.slider("Filterfenster", 11, 121, 45, step=2, key=f"sg_{key_suffix}")
                 with c3: edge_ignore_sec = st.slider("Rand-Ignorierung (Sek)", 0, 600, 120, step=10, key=f"edge_{key_suffix}")
             else:
-                c1, _ = st.columns([1, 4])
+                c1, _ = st.columns([0.5, 4.5])
                 with c1: min_power = st.slider("Mindestleistung (Watt)", 50, 400, default_min_power, step=5, key=f"min_p_{key_suffix}")
                 sg_win = 45
                 edge_ignore_sec = 120
         else:
-            c1, _ = st.columns([1, 4])
+            c1, _ = st.columns([0.5, 4.5])
             with c1:
                 pers_equi = st.session_state.get(f"persistent_equi_{key_suffix}", False)
                 equidistant = st.checkbox("Äquidistant (Gleiche Zeitabschnitte)", value=pers_equi, key=f"equi_{key_suffix}")
@@ -294,64 +294,126 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                 best_thresh_neg = 0
                 best_score = -1
                 
-                for factor in np.arange(0.35, 0.75, 0.05):
-                    thresh_pos = max_d * factor
-                    thresh_neg = min_d * factor
+                if target_duration and target_duration > 0 and not match_4020:
+                    # Hybrid-Methode: Erst grob über Rolling Window, dann Kanten per lokaler Ableitung finden
+                    target_sec = int(target_duration * 60)
                     
-                    is_above = deriv_data > thresh_pos
-                    is_below = deriv_data < thresh_neg
+                    # 1. Grobe Erkennung (Plateaus finden)
+                    heavy_smooth = df['p_clean'].rolling(window=15, min_periods=1, center=True).mean()
+                    roll_p = heavy_smooth.rolling(window=target_sec, min_periods=int(target_sec*0.5), center=True).mean()
                     
-                    starts_in = np.where((~is_above[:-1]) & is_above[1:])[0]
-                    starts_out = np.where(is_above[:-1] & (~is_above[1:]))[0]
-                    ends_in = np.where((~is_below[:-1]) & is_below[1:])[0]
-                    ends_out = np.where(is_below[:-1] & (~is_below[1:]))[0]
+                    valid_centers = roll_p >= min_power
+                    scores = roll_p.fillna(0).values
                     
-                    start_points = []
-                    for s_in in starts_in:
-                        s_out_cands = starts_out[starts_out > s_in]
-                        if len(s_out_cands) > 0: start_points.append((s_in + s_out_cands[0]) // 2)
-                            
-                    end_points = []
-                    for e_in in ends_in:
-                        e_out_cands = ends_out[ends_out > e_in]
-                        if len(e_out_cands) > 0: end_points.append((e_in + e_out_cands[0]) // 2)
-                            
-                    current_intervals = []
-                    last_end = -1
-                    for sp in start_points:
-                        if sp <= last_end: continue
-                        possible_ends = [ep for ep in end_points if ep > sp]
-                        if possible_ends:
-                            ep = possible_ends[0]
-                            next_starts = [nsp for nsp in start_points if nsp > sp]
-                            if not next_starts or ep < next_starts[0]:
-                                current_intervals.append((sp, ep))
-                                last_end = ep
+                    candidates = []
+                    for i in range(len(df)):
+                        if not valid_centers.iloc[i]: continue
+                        start_w = max(0, i - target_sec // 2)
+                        end_w = min(len(df), i + target_sec // 2)
+                        if scores[i] == np.max(scores[start_w:end_w]) and scores[i] > 0:
+                            if not candidates or (i - candidates[-1]) > (target_sec * 0.8):
+                                candidates.append(i)
                                 
-                    if current_intervals:
-                        durations = [ep - sp for sp, ep in current_intervals]
-                        cv = np.std(durations) / np.mean(durations) if len(durations) > 1 else 0
-                        score = len(current_intervals) * (1 - cv)
+                    take_n = target_intervals if target_intervals and target_intervals > 0 else 1
+                    candidates = sorted(candidates, key=lambda x: scores[x], reverse=True)[:take_n]
+                    candidates.sort()
+                    
+                    # 2. Lokale Kantenerkennung mittels Ableitung (+/- Suchradius um die vermutete Kante)
+                    search_radius = min(45, max(15, target_sec // 4)) 
+                    
+                    for center in candidates:
+                        approx_left = max(0, center - (target_sec // 2))
+                        approx_right = min(len(df) - 1, center + (target_sec // 2))
                         
-                        # Algorithmus an User-Regler koppeln
-                        if target_intervals and target_intervals > 0 and not match_4020:
-                            count_diff = abs(len(current_intervals) - target_intervals)
-                            if count_diff == 0:
-                                score += 1000 # Massiver Boost, wenn die Anzahl exakt stimmt!
-                            else:
-                                score -= count_diff * 10
-                                
-                        if target_duration and target_duration > 0 and not match_4020:
-                            target_sec = target_duration * 60
-                            avg_dur = np.mean(durations)
-                            if abs(avg_dur - target_sec) > (target_sec * 0.3):
-                                score -= 50
+                        # Linke Kante (pos. Ausschlag der Ableitung)
+                        search_start_l = max(0, approx_left - search_radius)
+                        search_start_r = min(len(df) - 1, approx_left + search_radius)
+                        deriv_window_start = deriv_data[search_start_l:search_start_r]
+                        
+                        if len(deriv_window_start) > 0 and np.max(deriv_window_start) > max_d * 0.2:
+                            left = search_start_l + np.argmax(deriv_window_start)
+                        else:
+                            left = approx_left
+                            while left < center and heavy_smooth.iloc[left] < min_power - 20: left += 1
+                            while left > 0 and heavy_smooth.iloc[left-1] >= min_power - 20: left -= 1
 
-                        if score > best_score:
-                            best_score = score
-                            best_intervals = current_intervals
-                            best_thresh_pos = thresh_pos
-                            best_thresh_neg = thresh_neg
+                        # Rechte Kante (neg. Ausschlag der Ableitung)
+                        search_end_l = max(0, approx_right - search_radius)
+                        search_end_r = min(len(df) - 1, approx_right + search_radius)
+                        deriv_window_end = deriv_data[search_end_l:search_end_r]
+                        
+                        if len(deriv_window_end) > 0 and np.min(deriv_window_end) < min_d * 0.2:
+                            right = search_end_l + np.argmin(deriv_window_end)
+                        else:
+                            right = approx_right
+                            while right > center and heavy_smooth.iloc[right] < min_power - 20: right -= 1
+                            while right < len(df) - 1 and heavy_smooth.iloc[right+1] >= min_power - 20: right += 1
+                            
+                        # Plausibilität: Wenn durch die Kanten das Intervall massiv beschnitten wird
+                        if left >= right or (right - left) < (target_sec * 0.6):
+                            left = max(0, center - target_sec // 2)
+                            right = min(len(df) - 1, center + target_sec // 2)
+                            
+                        best_intervals.append((left, right))
+                else:
+                    # Original-Logik (Globale Flankenerkennung) primär für 40/20 und "Unbekannt"
+                    for factor in np.arange(0.35, 0.75, 0.05):
+                        thresh_pos = max_d * factor
+                        thresh_neg = min_d * factor
+                        
+                        is_above = deriv_data > thresh_pos
+                        is_below = deriv_data < thresh_neg
+                        
+                        starts_in = np.where((~is_above[:-1]) & is_above[1:])[0]
+                        starts_out = np.where(is_above[:-1] & (~is_above[1:]))[0]
+                        ends_in = np.where((~is_below[:-1]) & is_below[1:])[0]
+                        ends_out = np.where(is_below[:-1] & (~is_below[1:]))[0]
+                        
+                        start_points = []
+                        for s_in in starts_in:
+                            s_out_cands = starts_out[starts_out > s_in]
+                            if len(s_out_cands) > 0: start_points.append((s_in + s_out_cands[0]) // 2)
+                                
+                        end_points = []
+                        for e_in in ends_in:
+                            e_out_cands = ends_out[ends_out > e_in]
+                            if len(e_out_cands) > 0: end_points.append((e_in + e_out_cands[0]) // 2)
+                                
+                        current_intervals = []
+                        last_end = -1
+                        for sp in start_points:
+                            if sp <= last_end: continue
+                            possible_ends = [ep for ep in end_points if ep > sp]
+                            if possible_ends:
+                                ep = possible_ends[0]
+                                next_starts = [nsp for nsp in start_points if nsp > sp]
+                                if not next_starts or ep < next_starts[0]:
+                                    current_intervals.append((sp, ep))
+                                    last_end = ep
+                                    
+                        if current_intervals:
+                            durations = [ep - sp for sp, ep in current_intervals]
+                            cv = np.std(durations) / np.mean(durations) if len(durations) > 1 else 0
+                            score = len(current_intervals) * (1 - cv)
+                            
+                            if target_intervals and target_intervals > 0 and not match_4020:
+                                count_diff = abs(len(current_intervals) - target_intervals)
+                                if count_diff == 0:
+                                    score += 1000
+                                else:
+                                    score -= count_diff * 10
+                                    
+                            if target_duration and target_duration > 0 and not match_4020:
+                                target_sec = target_duration * 60
+                                avg_dur = np.mean(durations)
+                                if abs(avg_dur - target_sec) > (target_sec * 0.3):
+                                    score -= 50
+
+                            if score > best_score:
+                                best_score = score
+                                best_intervals = current_intervals
+                                best_thresh_pos = thresh_pos
+                                best_thresh_neg = thresh_neg
                 
                 st.session_state[f'best_thresh_pos_{key_suffix}'] = best_thresh_pos
                 st.session_state[f'best_thresh_neg_{key_suffix}'] = best_thresh_neg
@@ -427,16 +489,16 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                 num_intervals = len(st.session_state['manual_intervals'])
                 df['highlight'] = df.apply(lambda row: row['power'] if row['is_interval'] else None, axis=1)
             
-            expected_intervals = num_intervals
-            if num_intervals > 0:
-                avg_dur_sec = sum((e_t - s_t).total_seconds() for s_t, e_t in st.session_state['manual_intervals']) / num_intervals
-                expected_duration_min = max(1, int((avg_dur_sec + 30) // 60))
+                expected_intervals = num_intervals
+                if num_intervals > 0:
+                    avg_dur_sec = sum((e_t - s_t).total_seconds() for s_t, e_t in st.session_state['manual_intervals']) / num_intervals
+                    expected_duration_min = max(1, int((avg_dur_sec + 30) // 60))
             
             # --- SETUP LAYOUT FOR UI ---
             type_options = ["LIT", "MIT", "HIT", "HIT 40/20", "GA", "RSH", "Draußen", "UNKNOWN"]
             idx = type_options.index(detected_type) if detected_type in type_options else 0
             
-            col_t, col_i, col_btn_save, col_btn_adj = st.columns([1.5, 2.5, 2.5, 3.5])
+            col_t, col_i, col_btn_save, col_btn_adj = st.columns([0.45, 0.8, 1.25, 7.5])
             with col_t:
                 detected_type = st.selectbox("Workout Typ", type_options, index=idx, key=f"type_{key_suffix}")
 
@@ -578,7 +640,6 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                             
                         avg_dur_sec = st.session_state.get(f'auto_dur_sec_{key_suffix}', 0)
                         exact_dur_display = f"{int(avg_dur_sec // 60):02d}:{int(avg_dur_sec % 60):02d} mm:ss"
-                        st.markdown(f'<div style="font-size: 14px; color: rgb(163, 168, 184); margin-bottom: 2px;">Intervalle ({status_text} | Ø {exact_dur_display})</div>', unsafe_allow_html=True)
                         
                         if f"ui_int_{key_suffix}" not in st.session_state:
                             st.session_state[f"ui_int_{key_suffix}"] = int(expected_intervals if expected_intervals > 0 else 1)
@@ -591,6 +652,8 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                         with cc2:
                             ui_duration = st.number_input("Dauer (Min)", min_value=1, step=1, key=f"ui_dur_{key_suffix}")
                             
+                        st.markdown(f'<div style="font-size: 13px; color: {color}; margin-top: 4px;">Status: {status_text} | Ø {exact_dur_display}</div>', unsafe_allow_html=True)
+                        
                         expected_intervals = ui_intervals
                         expected_duration_min = ui_duration
                         workout_structure = f"{expected_intervals}x{expected_duration_min}"
@@ -730,46 +793,88 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                         "Ø Watt": "{:.0f}", "Ø HF": "{:.0f}", "Efficiency": "{:.2f}", "NP": "{:.1f}",
                         "Max HF": "{:.0f}", "Δ HF+-": "{:.1f}", "Ø HF_P (20-80)": "{:.0f}"
                     }).set_properties(**{'text-align': 'center'}).set_table_styles([{'selector': 'th', 'props': [('text-align', 'center')]}])
-                    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        styled_df, 
+                        use_container_width=False, 
+                        hide_index=True,
+                        column_config={
+                            "Kennwerte pro Intervall": st.column_config.Column("Kennwerte pro Intervall", width=120),
+                            "Ø Watt": st.column_config.Column("Ø Watt", width=40),
+                            "Ø HF": st.column_config.Column("Ø HF", width=40),
+                            "Efficiency": st.column_config.Column("Efficiency", width=40),
+                            "NP": st.column_config.Column("NP", width=40),
+                            "Max HF": st.column_config.Column("Max HF", width=40),
+                            "Δ HF+-": st.column_config.Column("Δ HF+-", width=40),
+                            "Ø HF_P (20-80)": st.column_config.Column("Ø HF_P (20-80)", width=60),
+                            "Dauer (mm:ss)": st.column_config.Column("Dauer (mm:ss)", width=60)
+                        }
+                    )
                 
             st.subheader("Trainingsdaten & Analyse")
-            num_rows = 3 if is_admin else 2
-            fig_main = make_subplots(rows=num_rows, cols=1, shared_xaxes=True, vertical_spacing=0.04)
-            fig_main.add_trace(go.Scatter(x=df.index, y=df.get('power'), mode='lines', name='Rohleistung', line=dict(color='rgba(150, 150, 150, 0.4)', width=1)), row=1, col=1)
-            fig_main.add_trace(go.Scatter(x=df.index, y=df.get('p_sg'), mode='lines', name='Sav-Gol Trend', line=dict(color='rgba(51, 153, 255, 0.6)', width=1)), row=1, col=1)
-            fig_main.add_trace(go.Scatter(x=df.index, y=df.get('highlight'), mode='lines', name='Intervall (Power)', line=dict(color='#FFA500', width=2.5)), row=1, col=1)
             
-            if 'heart_rate' in df.columns and not df['heart_rate'].isna().all():
+            has_hr = 'heart_rate' in df.columns and not df['heart_rate'].isna().all()
+            alt_col = 'enhanced_altitude' if 'enhanced_altitude' in df.columns else 'altitude' if 'altitude' in df.columns else None
+            has_alt = bool(alt_col and not df[alt_col].isna().all())
+            
+            num_rows = 1
+            if has_hr: num_rows += 1
+            if has_alt: num_rows += 1
+            if is_admin: num_rows += 1
+            
+            fig_main = make_subplots(rows=num_rows, cols=1, shared_xaxes=True, vertical_spacing=0.04)
+            current_row = 1
+            
+            fig_main.add_trace(go.Scatter(x=df.index, y=df.get('power'), mode='lines', name='Rohleistung', line=dict(color='rgba(150, 150, 150, 0.4)', width=1)), row=current_row, col=1)
+            fig_main.add_trace(go.Scatter(x=df.index, y=df.get('p_sg'), mode='lines', name='Sav-Gol Trend', line=dict(color='rgba(51, 153, 255, 0.6)', width=1)), row=current_row, col=1)
+            fig_main.add_trace(go.Scatter(x=df.index, y=df.get('highlight'), mode='lines', name='Intervall (Power)', line=dict(color='#FFA500', width=2.5)), row=current_row, col=1)
+            
+            if has_hr:
+                current_row += 1
                 df['hr_clean'] = df['heart_rate'].ffill().bfill()
                 if is_ride_analysis:
                     df['hr_highlight'] = df.apply(lambda row: row['hr_clean'] if row['block_id'] % 2 != 0 else None, axis=1)
                 else:
                     df['hr_highlight'] = df.apply(lambda row: row['hr_clean'] if row['is_interval'] else None, axis=1)
-                fig_main.add_trace(go.Scatter(x=df.index, y=df['hr_clean'], mode='lines', name='Herzfrequenz', line=dict(color='rgba(255, 102, 102, 0.5)', width=1.5)), row=2, col=1)
-                fig_main.add_trace(go.Scatter(x=df.index, y=df['hr_highlight'], mode='lines', name='Intervall (HF)', line=dict(color='#FF3333', width=2.5)), row=2, col=1)
+                fig_main.add_trace(go.Scatter(x=df.index, y=df['hr_clean'], mode='lines', name='Herzfrequenz', line=dict(color='rgba(255, 102, 102, 0.5)', width=1.5)), row=current_row, col=1)
+                fig_main.add_trace(go.Scatter(x=df.index, y=df['hr_highlight'], mode='lines', name='Intervall (HF)', line=dict(color='#FF3333', width=2.5)), row=current_row, col=1)
+                
+            if has_alt:
+                current_row += 1
+                df['alt_clean'] = df[alt_col].ffill().bfill()
+                if is_ride_analysis:
+                    df['alt_highlight'] = df.apply(lambda row: row['alt_clean'] if row['block_id'] % 2 != 0 else None, axis=1)
+                else:
+                    df['alt_highlight'] = df.apply(lambda row: row['alt_clean'] if row['is_interval'] else None, axis=1)
+                fig_main.add_trace(go.Scatter(x=df.index, y=df['alt_clean'], mode='lines', name='Höhe', line=dict(color='rgba(200, 200, 200, 0.5)', width=1.5)), row=current_row, col=1)
+                fig_main.add_trace(go.Scatter(x=df.index, y=df['alt_highlight'], mode='lines', name='Intervall (Höhe)', line=dict(color='#FFFFFF', width=2.5)), row=current_row, col=1)
                 
             if is_admin:
-                fig_main.add_trace(go.Scatter(x=df.index, y=df.get('p_deriv'), mode='lines', name='Steigung (Ableitung)', line=dict(color='#33CC33', width=1.2)), row=3, col=1)
+                current_row += 1
+                fig_main.add_trace(go.Scatter(x=df.index, y=df.get('p_deriv'), mode='lines', name='Steigung (Ableitung)', line=dict(color='#33CC33', width=1.2)), row=current_row, col=1)
 
                 if not is_ride_analysis:
                     b_pos = st.session_state.get(f'best_thresh_pos_{key_suffix}', 0)
                     b_neg = st.session_state.get(f'best_thresh_neg_{key_suffix}', 0)
                     if b_pos != 0:
-                        fig_main.add_hline(y=b_pos, line_dash="dot", line_color="rgba(255, 255, 255, 0.5)", row=3, col=1, annotation_text=f"Pos ({b_pos:.1f})", annotation_position="top left")
-                        fig_main.add_hline(y=b_neg, line_dash="dot", line_color="rgba(255, 255, 255, 0.5)", row=3, col=1, annotation_text=f"Neg ({b_neg:.1f})", annotation_position="bottom left")
+                        fig_main.add_hline(y=b_pos, line_dash="dot", line_color="rgba(255, 255, 255, 0.5)", row=current_row, col=1, annotation_text=f"Pos ({b_pos:.1f})", annotation_position="top left")
+                        fig_main.add_hline(y=b_neg, line_dash="dot", line_color="rgba(255, 255, 255, 0.5)", row=current_row, col=1, annotation_text=f"Neg ({b_neg:.1f})", annotation_position="bottom left")
 
-            plot_height = 800 if is_admin else 550
-            fig_main.update_layout(template="plotly_dark", height=plot_height, hovermode="x unified", margin=dict(l=0, r=0, t=20, b=0), legend=dict(yanchor="top", y=1))
+            plot_height = max(550, 300 + (num_rows - 1) * 200)
+            drag_behavior = "select" if mode_type == "Manuell (Grafische Auswahl)" else "zoom"
+            fig_main.update_layout(template="plotly_dark", height=plot_height, hovermode="x unified", margin=dict(l=0, r=0, t=20, b=0), legend=dict(yanchor="top", y=1), dragmode=drag_behavior)
             
             selected_data = st.plotly_chart(fig_main, use_container_width=True, on_select="rerun", key=f"chart_{key_suffix}")
             
             if mode_type == "Manuell (Grafische Auswahl)":
                 st.markdown("### Manuelle Intervall-Bearbeitung")
+                st.info("💡 **Tipp:** Ziehe mit der Maus direkt im Graphen ein Rechteck über den gewünschten Zeitbereich, um ein neues Intervall zu markieren.")
                 start_t, end_t = None, None
                 if selected_data:
                     box = selected_data.get("selection", {}).get("box", None) or selected_data.get("box", None)
                     if box and isinstance(box, list): box = box[0]
-                    if isinstance(box, dict) and "x" in box: start_t, end_t = box["x"][0], box["x"][1]
+                    if isinstance(box, dict) and "x" in box: 
+                        t1, t2 = box["x"][0], box["x"][1]
+                        start_t, end_t = min(t1, t2), max(t1, t2)
                 
                 if start_t and end_t:
                     st.write(f"Auswahl: {start_t} bis {end_t}")
@@ -811,16 +916,24 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
 # --- LOGIN FUNKTION ---
 def check_login(username, password):
     conn = get_db_connection()
-    result = conn.query("SELECT id, password_hash, role FROM users WHERE name = :name", params={"name": username}, ttl=0)
+    try:
+        result = conn.query("SELECT id, password_hash, role, approved FROM users WHERE name = :name", params={"name": username}, ttl=0)
+    except Exception:
+        result = conn.query("SELECT id, password_hash, role FROM users WHERE name = :name", params={"name": username}, ttl=0)
+        
     if not result.empty:
         user = result.iloc[0]
         stored_hash = user['password_hash']
         role = str(user['role']).lower().strip() if user['role'] else 'user'
         user_id = int(user['id'])
+        is_approved = True if pd.isna(user.get('approved')) else bool(user.get('approved'))
+        
         input_hash = hashlib.sha256(password.encode()).hexdigest()
         if input_hash == stored_hash:
-            return True, role, user_id
-    return False, None, None
+            if not is_approved and role != 'admin':
+                return "not_approved", role, user_id
+            return "success", role, user_id
+    return "invalid", None, None
 
 # --- SESSION STATES ---
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
@@ -844,22 +957,6 @@ if AUTO_LOGIN and not st.session_state['logged_in']:
     else:
         st.warning(f"Auto-Login fehlgeschlagen: Benutzer '{AUTO_LOGIN_USERNAME}' existiert nicht.")
 
-# --- LOGIN-TOR ---
-if not st.session_state['logged_in']:
-    st.title("🔒 Login erforderlich")
-    user_in = st.text_input("Benutzername")
-    pass_in = st.text_input("Passwort", type="password")
-    if st.button("Anmelden"):
-        is_valid, role, user_id = check_login(user_in, pass_in)
-        if is_valid:
-            st.session_state['logged_in'] = True
-            st.session_state['user'] = user_in
-            st.session_state['role'] = role
-            st.session_state['user_id'] = user_id
-            st.rerun()
-        else: st.error("Benutzername oder Passwort falsch!")
-    st.stop()
-
 # --- SESSION STATES (Rest) ---
 if 'manual_intervals' not in st.session_state: st.session_state['manual_intervals'] = []
 if 'erfassungs_modus' not in st.session_state: st.session_state['erfassungs_modus'] = "Automatisch (Algorithmus)"
@@ -869,15 +966,31 @@ if 'workout_to_overwrite' not in st.session_state: st.session_state['workout_to_
 if 'df' not in st.session_state: st.session_state['df'] = pd.DataFrame()    
 
 # --- DATENBANK HELFER (PostgreSQL) ---
-def add_new_athlete(name, api_key, password, intervals_id): # <-- Parameter ergänzt
+def update_user_password(user_id, new_password):
+    pwd_hash = hashlib.sha256(new_password.encode()).hexdigest()
+    conn = get_db_connection()
+    with conn.session as s:
+        s.execute(text("UPDATE users SET password_hash = :pwd WHERE id = :uid"), {"pwd": pwd_hash, "uid": user_id})
+        s.commit()
+    st.cache_data.clear()
+    return True
+
+def add_new_athlete(name, api_key, password, intervals_id, approved=True):
     pwd_hash = hashlib.sha256(password.encode()).hexdigest()
     conn = get_db_connection()
     
     with conn.session as s:
-        s.execute(text("""
-            INSERT INTO users (name, api_key, password_hash, role, intervals_id) 
-            VALUES (:name, :api_key, :pwd, 'user', :iid)
-        """), {"name": name.strip(), "api_key": api_key.strip(), "pwd": pwd_hash, "iid": intervals_id.strip()})
+        try:
+            s.execute(text("""
+                INSERT INTO users (name, api_key, password_hash, role, intervals_id, approved) 
+                VALUES (:name, :api_key, :pwd, 'user', :iid, :approved)
+            """), {"name": name.strip(), "api_key": api_key.strip(), "pwd": pwd_hash, "iid": intervals_id.strip(), "approved": approved})
+        except Exception:
+            # Fallback, falls die SQL-Anweisung in Supabase noch nicht durchgeführt wurde
+            s.execute(text("""
+                INSERT INTO users (name, api_key, password_hash, role, intervals_id) 
+                VALUES (:name, :api_key, :pwd, 'user', :iid)
+            """), {"name": name.strip(), "api_key": api_key.strip(), "pwd": pwd_hash, "iid": intervals_id.strip()})
         s.commit()
     st.cache_data.clear()
     return True, f"Athlet '{name}' angelegt!"
@@ -985,6 +1098,54 @@ def transfer_to_manual(timestamps):
 def clear_bulk_targets():
     if 'bulk_temp_targets' in st.session_state:
         del st.session_state['bulk_temp_targets']
+# --- LOGIN-TOR ---
+if not st.session_state['logged_in']:
+    st.title("🔒 Powerdata Dashboard")
+    
+    tab_login, tab_reg, tab_forgot = st.tabs(["🔑 Anmelden", "📝 Registrieren", "❓ Passwort vergessen"])
+    
+    with tab_login:
+        user_in = st.text_input("Benutzername", key="log_user")
+        pass_in = st.text_input("Passwort", type="password", key="log_pass")
+        if st.button("Anmelden", use_container_width=True):
+            status, role, user_id = check_login(user_in, pass_in)
+            if status == "success":
+                st.session_state['logged_in'] = True
+                st.session_state['user'] = user_in
+                st.session_state['role'] = role
+                st.session_state['user_id'] = user_id
+                st.rerun()
+            elif status == "not_approved":
+                st.error("Dein Account wurde noch nicht freigegeben. Bitte warte auf die Aktivierung durch einen Administrator!")
+            else: st.error("Benutzername oder Passwort falsch!")
+            
+    with tab_reg:
+        st.markdown("**Neu hier? Lege dir ein Profil an.**")
+        reg_name = st.text_input("Benutzername", key="reg_name")
+        reg_api = st.text_input("Intervals.icu API Key", key="reg_api", type="password")
+        reg_id = st.text_input("Intervals.icu ID (z.B. 75948)", key="reg_id")
+        reg_pass = st.text_input("Passwort", type="password", key="reg_pass")
+        reg_pass2 = st.text_input("Passwort bestätigen", type="password", key="reg_pass2")
+        if st.button("Registrieren", use_container_width=True):
+            if reg_name and reg_api and reg_id and reg_pass:
+                if reg_pass == reg_pass2:
+                    conn = get_db_connection()
+                    res = conn.query("SELECT id FROM users WHERE name = :name", params={"name": reg_name}, ttl=0)
+                    if not res.empty:
+                        st.error("Dieser Benutzername existiert leider bereits!")
+                    else:
+                        add_new_athlete(reg_name, reg_api, reg_pass, reg_id, approved=False)
+                        st.success("Erfolgreich registriert! Dein Profil muss jedoch noch von einem Administrator freigegeben werden, bevor du dich einloggen kannst.")
+                else: st.error("Die Passwörter stimmen nicht überein!")
+            else: st.warning("Bitte fülle alle Felder aus.")
+            
+    with tab_forgot:
+        st.markdown("### Passwort vergessen?")
+        st.info("Da im Profil aktuell keine E-Mail-Adressen hinterlegt werden, ist ein automatischer Reset per E-Mail aus Sicherheitsgründen nicht möglich.")
+        st.markdown("Bitte wende dich direkt an deinen **Trainer oder Administrator**, um dein Passwort zurücksetzen zu lassen.")
+        
+    st.stop()
+
 
 # --- API CLOUD COCKPIT ---
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1019,19 +1180,60 @@ with col_logout:
             st.session_state['user_id'] = None
             st.rerun()
 
-nav_options = ["Training einlesen", "Daten & Auswertung", "Trendanalyse"]
+nav_options = ["Training einlesen", "Daten & Auswertung", "Trendanalyse", "⚙️ Einstellungen"]
 if st.session_state.get('role') == 'admin':
     nav_options.append("👤 Athleten verwalten")
     nav_options.append("Bulk Data Analyser")
 
 tabs = st.tabs(nav_options)
 
+with tabs[3]:
+    st.subheader("⚙️ Einstellungen")
+    st.markdown("### 🔑 Passwort ändern")
+    with st.form("change_pwd_form", clear_on_submit=True):
+        old_pass = st.text_input("Aktuelles Passwort", type="password")
+        new_pass = st.text_input("Neues Passwort", type="password")
+        new_pass2 = st.text_input("Neues Passwort bestätigen", type="password")
+        if st.form_submit_button("Passwort aktualisieren"):
+            if old_pass and new_pass and new_pass2:
+                status, _, _ = check_login(st.session_state['user'], old_pass)
+                if status == "success":
+                    if new_pass == new_pass2:
+                        update_user_password(st.session_state['user_id'], new_pass)
+                        st.success("Dein Passwort wurde erfolgreich geändert!")
+                    else:
+                        st.error("Die neuen Passwörter stimmen nicht überein.")
+                else:
+                    st.error("Das aktuelle Passwort ist falsch.")
+            else:
+                st.warning("Bitte fülle alle Felder aus.")
+
 # --- ADMIN-CHECK ---
-if len(tabs) > 3:
-    with tabs[3]:
+if len(tabs) > 4:
+    with tabs[4]:
         # WICHTIG: Alles ab hier muss eingerückt sein!
         if st.session_state.get('role') == 'admin':
             st.subheader("🛠️ Admin: Athleten verwalten")
+            
+            # --- AUSSTEHENDE FREIGABEN ---
+            conn = get_db_connection()
+            try:
+                unapproved = conn.query("SELECT id, name FROM users WHERE approved = FALSE", ttl=0)
+                if not unapproved.empty:
+                    st.markdown("### ⏳ Ausstehende Freigaben")
+                    for _, row in unapproved.iterrows():
+                        col_u1, col_u2 = st.columns([0.8, 0.2])
+                        col_u1.info(f"**{row['name']}** hat sich neu registriert und wartet auf Freigabe.")
+                        if col_u2.button("✅ Freigeben", key=f"approve_{row['id']}", use_container_width=True):
+                            with conn.session as s:
+                                s.execute(text("UPDATE users SET approved = TRUE WHERE id = :uid"), {"uid": int(row['id'])})
+                                s.commit()
+                            st.success(f"{row['name']} wurde erfolgreich freigegeben!")
+                            st.rerun()
+                    st.markdown("---")
+            except Exception:
+                pass
+                
             col_left, col_right = st.columns(2)
             
             with col_left:
@@ -1044,7 +1246,7 @@ if len(tabs) > 3:
                     submitted = st.form_submit_button("Speichern")
                     
                     if submitted:
-                        if name_in and key_in and pwd_in and id_in:
+                        if name_in and key_in and id_in and pwd_in:
                             success, message = add_new_athlete(name_in, key_in, pwd_in, id_in)
                             if success: st.success(message)
                             else: st.error(message)
@@ -1067,8 +1269,8 @@ if len(tabs) > 3:
         else:
             st.error("Zugriff verweigert! Nur für den Administrator.")
 
-if len(tabs) > 4:
-    with tabs[4]:
+if len(tabs) > 5:
+    with tabs[5]:
         if st.session_state.get('role') == 'admin':
             st.subheader("🚀 Bulk Data Analyser")
             
@@ -1135,7 +1337,7 @@ if len(tabs) > 4:
                     with b_col3:
                         bulk_end = st.date_input("End-Datum", datetime.now(), format="DD.MM.YYYY", key="bulk_end", on_change=clear_bulk_targets)
                         
-                    b_tags = st.multiselect("Intensität (Bulk):", ["HIT", "MIT", "LIT", "HIT 40/20", "GA", "RSH", "Draußen"], default=["HIT", "MIT", "LIT", "HIT 40/20", "GA", "RSH", "Draußen"], key="bulk_tags", on_change=clear_bulk_targets)
+                    b_tags = st.multiselect("Intensität (Bulk):", ["HIT", "MIT", "LIT", "HIT 40/20", "GA", "RSH", "Draußen"], default=[], key="bulk_tags", on_change=clear_bulk_targets)
                     
                     if st.button("Workouts suchen"):
                         with st.spinner("Lade Aktivitäten..."):
@@ -1267,11 +1469,11 @@ with tabs[0]:
                 
             st.markdown("#### Intervals.icu Trainingdata")
             
-            col_table, col_filter, _ = st.columns([4.5, 2.5, 3])
+            col_table, col_filter, _ = st.columns([4.5, 1.0, 4.5])
             
             with col_filter:
                 st.markdown("##### 🔍 Filter")
-                preselected_tags = st.multiselect("Intensität:", ["HIT", "MIT", "LIT", "GA", "RSH", "Draußen"], default=["HIT", "MIT", "LIT", "GA", "RSH", "Draußen"])
+                preselected_tags = st.multiselect("Intensität:", ["HIT", "MIT", "LIT", "GA", "RSH", "Draußen"], default=[])
                 custom_search = st.text_input("Freitext-Suche:", value="")
                 
             filtered_events = []
@@ -1307,9 +1509,9 @@ with tabs[0]:
                         hide_index=True, 
                         column_config={
                             "ID": None,
-                            "Datum": st.column_config.TextColumn("Datum", width=90),
-                            "Name": st.column_config.TextColumn("Name", width=180),
-                            "Status": st.column_config.TextColumn("Status", width=90)
+                            "Datum": st.column_config.TextColumn("Datum", width=45),
+                            "Name": st.column_config.TextColumn("Name", width=108),
+                            "Status": st.column_config.TextColumn("Status", width=45)
                         }
                     )
                     if sel and len(sel.get("selection", {}).get("rows", [])) > 0:
