@@ -33,6 +33,7 @@ div[data-testid="stDataFrame"] {
 }
 </style>
 """, unsafe_allow_html=True)
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_athlete_stats_from_intervals(api_key, athlete_id):
     auth = HTTPBasicAuth('API_KEY', api_key)
@@ -253,35 +254,36 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
             
             df['power_roll_30'] = df['p_clean'].rolling(window=30, min_periods=1).mean()
             
-            if is_ride_analysis:
-                total_sec = len(df)
-                if equidistant:
-                    num_chunks = int((total_sec + 1800) // 3600)
-                    if num_chunks < 1: num_chunks = 1
-                    chunk_len = total_sec / num_chunks
-                    if chunk_len < 1200 and num_chunks > 1:
-                        num_chunks -= 1
+            if mode_type == "Automatisch (Algorithmus)":
+                if is_ride_analysis:
+                    total_sec = len(df)
+                    if equidistant:
+                        num_chunks = int((total_sec + 1800) // 3600)
+                        if num_chunks < 1: num_chunks = 1
                         chunk_len = total_sec / num_chunks
-                    df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
-                    df.loc[df['block_id'] > num_chunks, 'block_id'] = num_chunks
-                else:
-                    num_full_chunks = total_sec // 3600
-                    remainder = total_sec % 3600
-                    if remainder > 0 and remainder < 1200 and num_full_chunks > 0:
-                        chunk_len = total_sec / num_full_chunks
+                        if chunk_len < 1200 and num_chunks > 1:
+                            num_chunks -= 1
+                            chunk_len = total_sec / num_chunks
                         df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
-                        df.loc[df['block_id'] > num_full_chunks, 'block_id'] = num_full_chunks
+                        df.loc[df['block_id'] > num_chunks, 'block_id'] = num_chunks
                     else:
-                        chunk_len = 3600
-                        df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
+                        num_full_chunks = total_sec // 3600
+                        remainder = total_sec % 3600
+                        if remainder > 0 and remainder < 1200 and num_full_chunks > 0:
+                            chunk_len = total_sec / num_full_chunks
+                            df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
+                            df.loc[df['block_id'] > num_full_chunks, 'block_id'] = num_full_chunks
+                        else:
+                            chunk_len = 3600
+                            df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
+                        
+                    df['is_interval'] = True
+                    num_intervals = df['block_id'].nunique()
+                    expected_intervals = num_intervals
+                    df['highlight'] = df.apply(lambda row: row['power'] if row['block_id'] % 2 != 0 else None, axis=1)
                     
-                df['is_interval'] = True
-                num_intervals = df['block_id'].nunique()
-                expected_intervals = num_intervals
-                df['highlight'] = df.apply(lambda row: row['power'] if row['block_id'] % 2 != 0 else None, axis=1)
-                
-            elif mode_type == "Automatisch (Algorithmus)":
-                deriv_data = df['p_deriv'].fillna(0).values.copy()
+                else:
+                    deriv_data = df['p_deriv'].fillna(0).values.copy()
                 if edge_ignore_sec > 0 and len(deriv_data) > edge_ignore_sec * 2:
                     deriv_data[:edge_ignore_sec] = 0
                     deriv_data[-edge_ignore_sec:] = 0
@@ -736,11 +738,16 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                                 st.rerun()
 
             with col_btn_adj:
-                if intervals_calculated:
+                if intervals_calculated or mode_type == "Manuell (Grafische Auswahl)" or is_ride_analysis:
                     st.markdown("<div style='margin-top: 1.8rem;'></div>", unsafe_allow_html=True)
-                    if mode_type == "Automatisch (Algorithmus)" and is_admin and not is_ride_analysis:
+                    if mode_type == "Automatisch (Algorithmus)" and is_admin:
                         auto_blocks_timestamps = [(df[df['block_id'] == b].index.min(), df[df['block_id'] == b].index.max()) for b in df[df['is_interval']]['block_id'].unique()]
-                        st.button("⚙️ Intervalle nachjustieren", on_click=transfer_to_manual, args=(auto_blocks_timestamps,), use_container_width=True, key=f"adj_{key_suffix}")
+                        if is_ride_analysis:
+                            st.button("⚙️ Manuelle Intervalle markieren", on_click=transfer_to_manual, args=(auto_blocks_timestamps,), use_container_width=True, key=f"adj_{key_suffix}")
+                        else:
+                            st.button("⚙️ Intervalle nachjustieren", on_click=transfer_to_manual, args=(auto_blocks_timestamps,), use_container_width=True, key=f"adj_{key_suffix}")
+                    elif mode_type == "Manuell (Grafische Auswahl)":
+                        st.button("🔄 Zurück zur Automatik", on_click=transfer_to_auto, use_container_width=True, key=f"adj_auto_{key_suffix}")
 
             # --- RENDER TABLES AND PLOTS ---
             st.markdown(f"""
@@ -831,7 +838,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
             if has_hr:
                 current_row += 1
                 df['hr_clean'] = df['heart_rate'].ffill().bfill()
-                if is_ride_analysis:
+                if is_ride_analysis and mode_type == "Automatisch (Algorithmus)":
                     df['hr_highlight'] = df.apply(lambda row: row['hr_clean'] if row['block_id'] % 2 != 0 else None, axis=1)
                 else:
                     df['hr_highlight'] = df.apply(lambda row: row['hr_clean'] if row['is_interval'] else None, axis=1)
@@ -841,12 +848,12 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
             if has_alt:
                 current_row += 1
                 df['alt_clean'] = df[alt_col].ffill().bfill()
-                if is_ride_analysis:
+                if is_ride_analysis and mode_type == "Automatisch (Algorithmus)":
                     df['alt_highlight'] = df.apply(lambda row: row['alt_clean'] if row['block_id'] % 2 != 0 else None, axis=1)
                 else:
                     df['alt_highlight'] = df.apply(lambda row: row['alt_clean'] if row['is_interval'] else None, axis=1)
-                fig_main.add_trace(go.Scatter(x=df.index, y=df['alt_clean'], mode='lines', name='Höhe', line=dict(color='rgba(200, 200, 200, 0.5)', width=1.5)), row=current_row, col=1)
-                fig_main.add_trace(go.Scatter(x=df.index, y=df['alt_highlight'], mode='lines', name='Intervall (Höhe)', line=dict(color='#FFFFFF', width=2.5)), row=current_row, col=1)
+                fig_main.add_trace(go.Scatter(x=df.index, y=df['alt_clean'], mode='lines', name='Höhe', line=dict(color='rgba(0, 204, 255, 0.4)', width=1.5)), row=current_row, col=1)
+                fig_main.add_trace(go.Scatter(x=df.index, y=df['alt_highlight'], mode='lines', name='Intervall (Höhe)', line=dict(color='#00CCFF', width=2.5)), row=current_row, col=1)
                 
             if is_admin:
                 current_row += 1
@@ -865,6 +872,48 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
             
             selected_data = st.plotly_chart(fig_main, use_container_width=True, on_select="rerun", key=f"chart_{key_suffix}")
             
+            has_gps = False
+            if 'position_lat' in df.columns and 'position_long' in df.columns:
+                lat_clean = df['position_lat'].dropna()
+                if not lat_clean.empty:
+                    # Semicircles (Garmin/FIT Standard) zu regulären Koordinaten konvertieren falls nötig
+                    if lat_clean.abs().max() > 90:
+                        df['lat'] = df['position_lat'] * (180.0 / (2**31))
+                        df['lon'] = df['position_long'] * (180.0 / (2**31))
+                    else:
+                        df['lat'] = df['position_lat']
+                        df['lon'] = df['position_long']
+                    has_gps = not df['lat'].isna().all()
+                    
+            if has_gps:
+                with st.expander("🗺️ GPS Route & Karte (Intervalle markiert)", expanded=False):
+                    df_map = df.dropna(subset=['lat', 'lon']).copy()
+                    
+                    fig_map = go.Figure()
+                    
+                    # 1. Normale Strecke (als blaue Basislinie)
+                    fig_map.add_trace(go.Scattermapbox(
+                        lat=df_map['lat'], lon=df_map['lon'], mode='lines',
+                        line=dict(width=3, color='rgba(51, 153, 255, 0.7)'),
+                        name='Route',
+                        hoverinfo='text',
+                        hovertext=df_map.index.strftime('%H:%M:%S') + '<br>Leistung: ' + df_map['power'].fillna(0).astype(int).astype(str) + ' W'
+                    ))
+                    
+                    # 2. Intervalle (als dicke orange Markierungen darüber)
+                    df_intervals = df_map[df_map['is_interval']]
+                    if not df_intervals.empty:
+                        fig_map.add_trace(go.Scattermapbox(
+                            lat=df_intervals['lat'], lon=df_intervals['lon'], mode='markers',
+                            marker=dict(size=6, color='#FFA500'),
+                            name='Intervalle',
+                            hoverinfo='text',
+                            hovertext=df_intervals.index.strftime('%H:%M:%S') + '<br>Leistung: ' + df_intervals['power'].fillna(0).astype(int).astype(str) + ' W'
+                        ))
+                        
+                    fig_map.update_layout(mapbox_style="open-street-map", mapbox=dict(center=dict(lat=df_map['lat'].mean(), lon=df_map['lon'].mean()), zoom=10), margin=dict(l=0, r=0, t=0, b=0), height=450, showlegend=False)
+                    st.plotly_chart(fig_map, use_container_width=True, key=f"map_{key_suffix}")
+            
             if mode_type == "Manuell (Grafische Auswahl)":
                 st.markdown("### Manuelle Intervall-Bearbeitung")
                 st.info("💡 **Tipp:** Ziehe mit der Maus direkt im Graphen ein Rechteck über den gewünschten Zeitbereich, um ein neues Intervall zu markieren.")
@@ -879,7 +928,25 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                 if start_t and end_t:
                     st.write(f"Auswahl: {start_t} bis {end_t}")
                     if st.button("Bereich als Intervall hinzufügen", key=f"add_{key_suffix}"):
-                        st.session_state['manual_intervals'].append((pd.to_datetime(start_t), pd.to_datetime(end_t)))
+                        new_s = pd.to_datetime(start_t)
+                        new_e = pd.to_datetime(end_t)
+                        
+                        updated_intervals = []
+                        for s, e in st.session_state['manual_intervals']:
+                            if e < new_s or s > new_e:
+                                updated_intervals.append((s, e))
+                            elif s < new_s and e > new_e:
+                                updated_intervals.append((s, new_s - pd.Timedelta(seconds=1)))
+                                updated_intervals.append((new_e + pd.Timedelta(seconds=1), e))
+                            elif s < new_s and e >= new_s and e <= new_e:
+                                updated_intervals.append((s, new_s - pd.Timedelta(seconds=1)))
+                            elif s >= new_s and s <= new_e and e > new_e:
+                                updated_intervals.append((new_e + pd.Timedelta(seconds=1), e))
+                                
+                        updated_intervals.append((new_s, new_e))
+                        updated_intervals = [(s, e) for s, e in updated_intervals if s <= e]
+                        
+                        st.session_state['manual_intervals'] = updated_intervals
                         st.rerun()
                         
                 if st.session_state['manual_intervals']:
@@ -942,7 +1009,7 @@ if 'user' not in st.session_state: st.session_state['user'] = None
 if 'user_id' not in st.session_state: st.session_state['user_id'] = None
 
 # --- LOKALER DEV-MODUS (AUTO-LOGIN) ---
-AUTO_LOGIN = False  # <--- Auf False setzen, bevor du den Code produktiv stellst!
+AUTO_LOGIN = True  # <--- Auf False setzen, bevor du den Code produktiv stellst!
 AUTO_LOGIN_USERNAME = "Bastian"  # <--- Trage hier deinen Datenbank-Benutzernamen ein
 
 if AUTO_LOGIN and not st.session_state['logged_in']:
@@ -1098,6 +1165,12 @@ def transfer_to_manual(timestamps):
 def clear_bulk_targets():
     if 'bulk_temp_targets' in st.session_state:
         del st.session_state['bulk_temp_targets']
+
+def transfer_to_auto():
+    st.session_state['erfassungs_modus'] = "Automatisch (Algorithmus)"
+    st.session_state['overwrite_warning'] = False
+    st.session_state['interval_mismatch_warning'] = False
+
 # --- LOGIN-TOR ---
 if not st.session_state['logged_in']:
     st.title("🔒 Powerdata Dashboard")
@@ -1146,7 +1219,6 @@ if not st.session_state['logged_in']:
         
     st.stop()
 
-
 # --- API CLOUD COCKPIT ---
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_calendar_events(api_key, start_dt, end_dt):
@@ -1186,12 +1258,43 @@ def fetch_upcoming_events(api_key, athlete_id):
         response = requests.get(url, params=params, auth=HTTPBasicAuth('API_KEY', api_key), timeout=10)
         if response.status_code == 200:
             events = response.json()
-            # Filtere nach Event-Kategorien (A, B, C und normale Events). Typ-Filter entfernt (erlaubt auch VirtualRide/Zwift)
-            races = [e for e in events if str(e.get('category', '')).upper() in ['RACE', 'RACE_A', 'RACE_B', 'RACE_C', 'EVENT']]
+            # Filtere nach "RACE" Kategorien (A, B, C) und Typ "Ride"
+            races = [e for e in events if str(e.get('category', '')).upper() in ['RACE', 'RACE_A', 'RACE_B', 'RACE_C'] and e.get('type') == 'Ride']
             races.sort(key=lambda x: x.get('start_date_local', '9999'))
             return races
     except Exception: pass
     return []
+
+def upload_workout_to_intervals(api_key, athlete_id, date, name, description, workout_text):
+    if pd.isna(athlete_id) or str(athlete_id).strip() in ["", "None", "nan"]:
+        clean_id = "0"
+    else:
+        clean_id = str(athlete_id).strip()
+        
+    if clean_id != "0" and not clean_id.lower().startswith("i"):
+        clean_id = f"i{clean_id}"
+        
+    url = f"https://intervals.icu/api/v1/athlete/{clean_id}/events"
+    
+    # Intervals wertet die Description als Grundlage für die strukturierten Intervalle aus
+    full_description = f"{description}\n\n{workout_text}" if description else workout_text
+    
+    payload = {
+        "start_date_local": f"{date.strftime('%Y-%m-%d')}T00:00:00",
+        "type": "Ride",
+        "category": "WORKOUT",
+        "name": name,
+        "description": full_description
+    }
+    
+    try:
+        response = requests.post(url, json=payload, auth=HTTPBasicAuth('API_KEY', api_key), timeout=10)
+        if response.status_code == 200:
+            return True, "Workout erfolgreich in Intervals.icu hochgeladen!"
+        else:
+            return False, f"Fehler {response.status_code}: {response.text}"
+    except Exception as e:
+        return False, f"Verbindungsfehler: {e}"
 
 # --- SURFACE LAYOUT ---
 col_title, col_logout = st.columns([8, 1])
@@ -1206,7 +1309,7 @@ with col_logout:
             st.session_state['user_id'] = None
             st.rerun()
 
-nav_options = ["Training einlesen", "Daten & Auswertung", "Trendanalyse", "⚙️ Einstellungen"]
+nav_options = ["Training einlesen", "Daten & Auswertung", "Trendanalyse", "🧠 Smart Workout Builder", "⚙️ Einstellungen"]
 if st.session_state.get('role') == 'admin':
     nav_options.append("👤 Athleten verwalten")
     nav_options.append("Bulk Data Analyser")
@@ -1214,6 +1317,250 @@ if st.session_state.get('role') == 'admin':
 tabs = st.tabs(nav_options)
 
 with tabs[3]:
+    st.subheader("🧠 Smart Workout Builder")
+    st.markdown("Definiere deine Rahmenbedingungen. Der Builder findet alle mathematisch möglichen Intervall-Kombinationen, die deinen Vorgaben entsprechen.")
+    
+    col_wb_left, col_wb_right = st.columns([1, 1])
+    
+    with col_wb_left:
+        auth_users = get_authorized_athletes(st.session_state['user'], st.session_state['role'], st.session_state.get('user_id'))
+        wb_athlete = None
+        default_ftp = 250
+        
+        if not auth_users.empty:
+            c_ath1, c_ath2 = st.columns(2)
+            with c_ath1:
+                wb_athlete = st.selectbox("Ziel-Account (Für FTP & Upload)", auth_users['name'].tolist(), key="smart_ath_sel")
+            ath_row = auth_users[auth_users['name'] == wb_athlete].iloc[0]
+            stats = get_athlete_stats_from_intervals(ath_row['api_key'], ath_row.get('intervals_id', '0'))
+            if stats.get('FTP') and str(stats['FTP']) != "-":
+                default_ftp = int(stats['FTP'])
+            with c_ath2:
+                wb_ftp = st.number_input("Referenz-FTP (Watt)", value=default_ftp, key="smart_ftp")
+        else:
+            wb_ftp = st.number_input("Referenz-FTP (Watt)", value=default_ftp, key="smart_ftp")
+
+        with st.form("smart_builder_form"):
+            st.markdown("##### 1. Block-Zeiten & Intervalle")
+            c1, c2, c3, c4 = st.columns(4)
+            t_ges_target = c1.number_input("Ziel Gesamtzeit (Min) ±3", 1, 300, 50)
+            n_min = c2.number_input("Min Anzahl Intervalle", 1, 50, 5)
+            n_max = c2.number_input("Max Anzahl", 1, 50, 9)
+            t_p_min_str = c3.text_input("Min Pause (mm:ss)", "01:00")
+            t_p_max_str = c3.text_input("Max Pause (mm:ss)", "01:00")
+            t_i_min_str = c4.text_input("Min Intervall (mm:ss)", "00:10")
+            t_i_max_str = c4.text_input("Max Intervall (mm:ss)", "20:00")
+            
+            def parse_mmss(val, default):
+                try:
+                    if ':' in val:
+                        m, s = val.split(':')
+                        return int(m) * 60 + int(s)
+                    return int(val)
+                except:
+                    return default
+                    
+            t_p_min = parse_mmss(t_p_min_str, 60)
+            t_p_max = parse_mmss(t_p_max_str, 60)
+            t_i_min = parse_mmss(t_i_min_str, 10)
+            t_i_max = parse_mmss(t_i_max_str, 1200)
+            
+            st.markdown("##### 2. Leistungsvorgaben (Watt)")
+            c5, c6, c7, c8 = st.columns(4)
+            w_i1_min = c5.number_input("Min Start-Watt (1. Int)", 50, 1500, 250)
+            w_i1_max = c5.number_input("Max Start-Watt", 50, 1500, 250)
+            g_min = c6.number_input("Min Steigerung pro Int. (G)", -50, 50, 5)
+            g_max = c6.number_input("Max Steigerung pro Int.", -50, 50, 5)
+            w_p_min = c7.number_input("Min Pausen-Watt", 30, 500, 140)
+            w_p_max = c7.number_input("Max Pausen-Watt", 30, 500, 160)
+            w_avg_min = c8.number_input("Min Ø-Watt (Gesamtblock)", 50, 500, 218)
+            w_avg_max = c8.number_input("Max Ø-Watt", 50, 500, 222)
+            
+            st.markdown("##### 3. Extras")
+            c9, c10 = st.columns(2)
+            wu_dur = c9.number_input("Warmup davor (Min)", 0, 60, 10)
+            cd_dur = c10.number_input("Cooldown danach (Min)", 0, 60, 10)
+            
+            submit_search = st.form_submit_button("🔍 Lösungsraum berechnen", type="primary")
+            
+        if submit_search:
+            import time
+            start_time = time.time()
+            sols = []
+            max_reached = False
+            
+            # Sicherstellen, dass Min <= Max
+            _n_min, _n_max = min(n_min, n_max), max(n_min, n_max)
+            _t_ges_min, _t_ges_max = max(1, t_ges_target - 3), t_ges_target + 3
+            _t_p_min, _t_p_max = min(t_p_min, t_p_max), max(t_p_min, t_p_max)
+            _t_i_min, _t_i_max = min(t_i_min, t_i_max), max(t_i_min, t_i_max)
+            _w_i1_min, _w_i1_max = min(w_i1_min, w_i1_max), max(w_i1_min, w_i1_max)
+            _g_min, _g_max = min(g_min, g_max), max(g_min, g_max)
+            _w_p_min, _w_p_max = min(w_p_min, w_p_max), max(w_p_min, w_p_max)
+            _w_avg_min, _w_avg_max = min(w_avg_min, w_avg_max), max(w_avg_min, w_avg_max)
+            
+            for n in range(int(_n_min), int(_n_max) + 1):
+                if max_reached or time.time() - start_time > 3.0: break
+                for t_ges in range(int(_t_ges_min), int(_t_ges_max) + 1):
+                    if max_reached: break
+                    t_ges_sec = t_ges * 60
+                    for t_p in range(int(_t_p_min), int(_t_p_max) + 1):
+                        if t_p % 5 != 0: continue
+                        t_i = (t_ges_sec - (n - 1) * t_p) / n if n > 1 else t_ges_sec
+                        
+                        if t_i < _t_i_min or t_i > _t_i_max: continue
+                        t_i_rnd = round(t_i, 1)
+                        if t_i_rnd % 5 != 0: continue
+                            
+                        step_w1 = 5 if _w_i1_max > _w_i1_min else 1
+                        for w_i1 in range(int(_w_i1_min), int(_w_i1_max) + 1, step_w1):
+                            if max_reached: break
+                            step_g = 1 if _g_max > _g_min else 1
+                            for G in range(int(_g_min), int(_g_max) + 1, step_g):
+                                step_wp = 5 if _w_p_max > _w_p_min else 1
+                                for w_p in range(int(_w_p_min), int(_w_p_max) + 1, step_wp):
+                                    if n > 1 and t_p > 0:
+                                        W_int = n * w_i1 * t_i + G * t_i * n * (n - 1) / 2
+                                        W_pause = (n - 1) * w_p * t_p
+                                        w_avg_calc = (W_int + W_pause) / t_ges_sec
+                                    elif n == 1:
+                                        w_avg_calc = w_i1
+                                        
+                                    if _w_avg_min <= w_avg_calc <= _w_avg_max:
+                                        score = 0
+                                        if t_i_rnd % 30 == 0: score += 4
+                                        elif t_i_rnd % 15 == 0: score += 2
+                                        elif t_i_rnd % 10 == 0: score += 1
+                                        if t_p % 30 == 0: score += 4
+                                        elif t_p % 15 == 0: score += 2
+                                        elif t_p % 10 == 0: score += 1
+                                        if w_i1 % 10 == 0: score += 2
+                                        elif w_i1 % 5 == 0: score += 1
+                                        if w_p % 10 == 0: score += 2
+                                        elif w_p % 5 == 0: score += 1
+                                        
+                                        sols.append({'n': n, 't_ges': t_ges, 't_i': t_i_rnd, 't_p': t_p, 'w_i1': w_i1, 'G': G, 'w_p': w_p, 'w_avg': int(round(w_avg_calc, 0)), 'score': score})
+                                        if len(sols) >= 1000:
+                                            max_reached = True
+                                            break
+            sols.sort(key=lambda x: x['score'], reverse=True)
+            st.session_state['smart_sols'] = sols[:100]
+            st.session_state['smart_searched'] = True
+            
+        sel = None
+        if st.session_state.get('smart_searched'):
+            sols = st.session_state.get('smart_sols', [])
+            if not sols:
+                st.warning("⚠️ Keine Lösung gefunden! Bitte lockere die Toleranzen (z.B. größere Spanne bei Ø-Watt oder Gesamtzeit).")
+            else:
+                st.success(f"✅ {len(sols)} mögliche Kombinationen gefunden (Zeige max. 100). Bitte wähle eine aus der Tabelle aus:")
+                df_sols = pd.DataFrame(sols)
+                df_sols = df_sols.drop(columns=['score'], errors='ignore')
+                
+                df_sols['t_i_fmt'] = df_sols['t_i'].apply(lambda x: f"{int(round(x))//60:02d}:{int(round(x))%60:02d}")
+                df_sols['t_p_fmt'] = df_sols['t_p'].apply(lambda x: f"{int(round(x))//60:02d}:{int(round(x))%60:02d}")
+                
+                df_sols = df_sols[['t_ges', 'n', 't_i_fmt', 't_p_fmt', 'w_i1', 'G', 'w_p', 'w_avg']]
+                df_sols = df_sols.rename(columns={
+                    't_ges': 'Blockzeit (Min)', 'n': 'Anzahl', 't_i_fmt': 'Intervall', 
+                    't_p_fmt': 'Pause', 'w_i1': 'Start-Watt', 'G': '+ Watt/Int', 
+                    'w_p': 'Pausen-Watt', 'w_avg': 'Ø-Watt'
+                })
+                
+                sel = st.dataframe(df_sols, selection_mode="single-row", on_select="rerun", use_container_width=True, hide_index=True)
+                
+    if st.session_state.get('smart_searched') and sel and sel.get("selection", {}).get("rows"):
+        with col_wb_right:
+            idx = sel["selection"]["rows"][0]
+            best_sol = sols[idx]
+            
+            t_i_str = f"{int(round(best_sol['t_i']))//60:02d}:{int(round(best_sol['t_i']))%60:02d}"
+            st.markdown(f"#### 📊 Vorschau: {best_sol['n']}x {t_i_str} Intervalle")
+            
+            x_vals = [0]
+            y_vals = [0]
+            c_t = 0
+            
+            wu_w = int(wb_ftp * 0.6)
+            if wu_dur > 0:
+                x_vals.extend([c_t, c_t + wu_dur*60])
+                y_vals.extend([wu_w, wu_w])
+                c_t += wu_dur*60
+            
+            for i in range(best_sol['n']):
+                w_i = best_sol['w_i1'] + i * best_sol['G']
+                x_vals.extend([c_t, c_t + best_sol['t_i']])
+                y_vals.extend([w_i, w_i])
+                c_t += best_sol['t_i']
+                
+                if i < best_sol['n'] - 1:
+                    x_vals.extend([c_t, c_t + best_sol['t_p']])
+                    y_vals.extend([best_sol['w_p'], best_sol['w_p']])
+                    c_t += best_sol['t_p']
+                    
+            cd_w = int(wb_ftp * 0.4)
+            if cd_dur > 0:
+                x_vals.extend([c_t, c_t + cd_dur*60])
+                y_vals.extend([cd_w, cd_w])
+                c_t += cd_dur*60
+                
+            fig = px.line(x=x_vals, y=y_vals)
+            fig.update_traces(line_shape='hv', line=dict(color='#FFA500', width=2))
+            fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=10,b=0), xaxis_title="Zeit (Sekunden)", yaxis_title="Watt")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.markdown("#### 💾 Exportieren")
+            c_exp1, c_exp2 = st.columns([1, 1])
+            wb_name = st.text_input("Workout Name", "Smart Workout")
+            
+            def build_smart_zwo():
+                lines = []
+                lines.append('<workout_file>')
+                lines.append('  <author>Powerdata Dashboard</author>')
+                lines.append(f'  <name>{wb_name}</name>')
+                lines.append('  <sportType>bike</sportType>')
+                lines.append('  <tags></tags>')
+                lines.append('  <workout>')
+                if wu_dur > 0:
+                    lines.append(f'    <Warmup Duration="{wu_dur*60}" PowerLow="0.4" PowerHigh="0.6" />')
+                
+                for i in range(best_sol['n']):
+                    w_i = best_sol['w_i1'] + i * best_sol['G']
+                    lines.append(f'    <SteadyState Duration="{int(best_sol["t_i"])}" Power="{w_i/wb_ftp:.2f}" />')
+                    if i < best_sol['n'] - 1:
+                        lines.append(f'    <SteadyState Duration="{int(best_sol["t_p"])}" Power="{best_sol["w_p"]/wb_ftp:.2f}" />')
+                        
+                if cd_dur > 0:
+                    lines.append(f'    <Cooldown Duration="{cd_dur*60}" PowerLow="0.6" PowerHigh="0.4" />')
+                    
+                lines.append('  </workout>')
+                lines.append('</workout_file>')
+                return "\n".join(lines)
+            
+            c_exp1.download_button("💾 Als Zwift (.zwo) speichern", data=build_smart_zwo(), file_name=f"{wb_name.replace(' ', '_')}.zwo", mime="application/xml", use_container_width=True)
+            
+            if wb_athlete:
+                if c_exp2.button("☁️ In Intervals.icu hochladen", use_container_width=True):
+                    with st.spinner("Lade hoch..."):
+                        t_lines = []
+                        if wu_dur > 0: t_lines.append(f"- {wu_dur}m {int(wb_ftp*0.4)}-{int(wb_ftp*0.6)}W")
+                        
+                        for i in range(best_sol['n']):
+                            w_i = best_sol['w_i1'] + i * best_sol['G']
+                            ti_str = f"{int(round(best_sol['t_i']))//60:02d}:{int(round(best_sol['t_i']))%60:02d}"
+                            t_lines.append(f"- {ti_str} {w_i}W")
+                            if i < best_sol['n'] - 1:
+                                tp_str = f"{int(round(best_sol['t_p']))//60:02d}:{int(round(best_sol['t_p']))%60:02d}"
+                                t_lines.append(f"- {tp_str} {best_sol['w_p']}W")
+                                
+                        if cd_dur > 0: t_lines.append(f"- {cd_dur}m {int(wb_ftp*0.6)}-{int(wb_ftp*0.4)}W")
+                        
+                        i_text = "\n".join(t_lines)
+                        ok, msg = upload_workout_to_intervals(ath_row['api_key'], ath_row.get('intervals_id', '0'), datetime.now() + timedelta(days=1), wb_name, "Erstellt mit dem Smart Builder", i_text)
+                        if ok: st.success(msg)
+                        else: st.error(msg)
+
+with tabs[4]:
     st.subheader("⚙️ Einstellungen")
     st.markdown("### 🔑 Passwort ändern")
     with st.form("change_pwd_form", clear_on_submit=True):
@@ -1235,8 +1582,8 @@ with tabs[3]:
                 st.warning("Bitte fülle alle Felder aus.")
 
 # --- ADMIN-CHECK ---
-if len(tabs) > 4:
-    with tabs[4]:
+if len(tabs) > 5:
+    with tabs[5]:
         # WICHTIG: Alles ab hier muss eingerückt sein!
         if st.session_state.get('role') == 'admin':
             st.subheader("🛠️ Admin: Athleten verwalten")
@@ -1295,8 +1642,8 @@ if len(tabs) > 4:
         else:
             st.error("Zugriff verweigert! Nur für den Administrator.")
 
-if len(tabs) > 5:
-    with tabs[5]:
+if len(tabs) > 6:
+    with tabs[6]:
         if st.session_state.get('role') == 'admin':
             st.subheader("🚀 Bulk Data Analyser")
             
@@ -1848,6 +2195,56 @@ with tabs[1]:
                             styled_df = display_df.style.format(format_dict).set_properties(**{'text-align': 'center'}).set_table_styles([{'selector': 'th', 'props': [('text-align', 'center')]}])
                             
                             st.dataframe(styled_df, hide_index=True, use_container_width=True)
+
+                    st.markdown("---")
+                    st.markdown("#### 🗺️ GPS Routen (Live aus der Cloud)")
+                    st.info("💡 GPS-Daten verbrauchen extrem viel Speicherplatz und werden deshalb nicht in deiner Datenbank abgelegt. Stattdessen zieht das Dashboard die Karte in Echtzeit basierend auf der Workout-ID aus der Cloud (Intervals.icu)!")
+                    
+                    if st.button("📍 Karten für ausgewählte Workouts laden", use_container_width=True, key="load_live_maps"):
+                        st.session_state['eval_show_live_maps'] = True
+                        
+                    if st.session_state.get('eval_show_live_maps'):
+                        with st.spinner("Lade GPS-Daten aus der Cloud..."):
+                            for w in unique_workouts:
+                                sub_df = df_compare[df_compare['Workout'] == w]
+                                act_id = sub_df['intervals_activity_id'].iloc[0] if 'intervals_activity_id' in sub_df.columns else None
+                                
+                                if pd.notna(act_id) and str(act_id).strip() != "" and str(act_id) != "None":
+                                    bin_data, _ = download_original_fit_file(athlete_row['api_key'], act_id)
+                                    if bin_data:
+                                        try:
+                                            fitfile = fitparse.FitFile(io.BytesIO(bin_data))
+                                            records = [r.get_values() for r in fitfile.get_messages('record')]
+                                            df_map_live = pd.DataFrame(records)
+                                            
+                                            if 'position_lat' in df_map_live.columns and 'position_long' in df_map_live.columns:
+                                                df_map_live = df_map_live.dropna(subset=['position_lat', 'position_long'])
+                                                if not df_map_live.empty:
+                                                    if df_map_live['position_lat'].abs().max() > 90:
+                                                        df_map_live['lat'] = df_map_live['position_lat'] * (180.0 / (2**31))
+                                                        df_map_live['lon'] = df_map_live['position_long'] * (180.0 / (2**31))
+                                                    else:
+                                                        df_map_live['lat'] = df_map_live['position_lat']
+                                                        df_map_live['lon'] = df_map_live['position_long']
+                                                    
+                                                    fig_map_live = go.Figure()
+                                                    fig_map_live.add_trace(go.Scattermapbox(
+                                                        lat=df_map_live['lat'], lon=df_map_live['lon'], mode='lines',
+                                                        line=dict(width=3, color=global_color_map.get(w, 'rgba(51, 153, 255, 0.7)')),
+                                                        name=w
+                                                    ))
+                                                    fig_map_live.update_layout(mapbox_style="open-street-map", mapbox=dict(center=dict(lat=df_map_live['lat'].mean(), lon=df_map_live['lon'].mean()), zoom=10), margin=dict(l=0, r=0, t=30, b=0), height=400, title=f"Route: {w}")
+                                                    st.plotly_chart(fig_map_live, use_container_width=True, key=f"map_live_{act_id}_{w}")
+                                                else:
+                                                    st.warning(f"Keine verwertbaren GPS-Koordinaten in {w} gefunden.")
+                                            else:
+                                                st.warning(f"Das Workout {w} enthält keine GPS-Spuren.")
+                                        except Exception as e:
+                                            st.error(f"Fehler beim Laden der Karte für {w}: {e}")
+                                    else:
+                                        st.warning(f"Konnte die FIT-Datei für {w} nicht aus der Cloud laden.")
+                                else:
+                                    st.info(f"Das Workout '{w}' hat keine verknüpfte Cloud-ID (wurde vermutlich lokal importiert).")
                 else:
                     st.warning("⚠️ Zu diesem Workout wurden keine Intervall-Daten gefunden (vermutlich ein alter/fehlerhafter Speicherstand). Bitte lösche das Workout über den 🗑️-Button und speichere es neu aus der Cloud ein.")
 
