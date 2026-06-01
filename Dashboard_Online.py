@@ -1167,6 +1167,32 @@ def download_original_fit_file(api_key, activity_id):
         return None, f"Fehler {response.status_code}"
     except Exception as e: return None, str(e)
 
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_upcoming_events(api_key, athlete_id):
+    if pd.isna(athlete_id) or str(athlete_id).strip() in ["", "None", "nan"]:
+        clean_id = "0"
+    else:
+        clean_id = str(athlete_id).strip()
+        
+    if clean_id != "0" and not clean_id.lower().startswith("i"):
+        clean_id = f"i{clean_id}"
+    url = f"https://intervals.icu/api/v1/athlete/{clean_id}/events"
+    
+    start_str = datetime.now().strftime('%Y-%m-%d')
+    end_str = (datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d')
+    params = {"oldest": start_str, "newest": end_str}
+    
+    try:
+        response = requests.get(url, params=params, auth=HTTPBasicAuth('API_KEY', api_key), timeout=10)
+        if response.status_code == 200:
+            events = response.json()
+            # Filtere nach Event-Kategorien (A, B, C und normale Events). Typ-Filter entfernt (erlaubt auch VirtualRide/Zwift)
+            races = [e for e in events if str(e.get('category', '')).upper() in ['RACE', 'RACE_A', 'RACE_B', 'RACE_C', 'EVENT']]
+            races.sort(key=lambda x: x.get('start_date_local', '9999'))
+            return races
+    except Exception: pass
+    return []
+
 # --- SURFACE LAYOUT ---
 col_title, col_logout = st.columns([8, 1])
 with col_title:
@@ -1598,13 +1624,46 @@ with tabs[1]:
             str_ftp = f"{ftp} W" if str(ftp) != "-" else "-"
             str_hr = f"{stats['Max HR']} bpm" if str(stats['Max HR']) != "-" else "-"
             
-            profile_df = pd.DataFrame([
-                [f"{selected_name}", f"Stand: {datetime.now().strftime('%d.%m.%y')}"],
-                [f"Alter: {stats['Age']}", f"Gewicht: {str_weight}"],
-                [f"FTP: {str_ftp}", w_kg],
-                [f"Max HF: {str_hr}", ""]
-            ])
-            st.table(profile_df.set_axis([' ', '  '], axis=1))
+            profile_html = f"""
+            <table style="width: 75%; border-collapse: collapse; font-size: 0.9rem; margin-bottom: 1rem;">
+                <thead>
+                    <tr>
+                        <th style="text-align: left; padding-bottom: 8px; border-bottom: 1px solid #444;">{selected_name}</th>
+                        <th style="text-align: left; padding-bottom: 8px; border-bottom: 1px solid #444;">Stand: {datetime.now().strftime('%d.%m.%y')}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding: 4px 0;">Alter: {stats['Age']}</td><td style="padding: 4px 0;">Gewicht: {str_weight}</td></tr>
+                    <tr><td style="padding: 4px 0;">FTP: {str_ftp}</td><td style="padding: 4px 0;">{w_kg}</td></tr>
+                    <tr><td style="padding: 4px 0;">Max HF: {str_hr}</td><td style="padding: 4px 0;"></td></tr>
+                </tbody>
+            </table>
+            """
+            st.markdown(profile_html, unsafe_allow_html=True)
+            
+            # --- ANSTEHENDE EVENTS ---
+            st.markdown("##### 📅 Anstehende Events")
+            upcoming_races = fetch_upcoming_events(athlete_row['api_key'], athlete_row.get('intervals_id', '0'))
+            if upcoming_races:
+                events_html = "<ul style='margin-top: 0; padding-left: 20px; line-height: 1.4; font-size: 0.9rem;'>"
+                for r in upcoming_races[:3]:
+                    r_date = r.get('start_date_local', '')[:10]
+                    r_date_str = f"{r_date[8:10]}.{r_date[5:7]}.{r_date[0:4]}" if len(r_date) == 10 else r_date
+                    r_name = r.get('name', 'Rennen')
+                    
+                    dist_m = r.get('distance')
+                    elev_m = r.get('total_elevation_gain') or r.get('elevation_gain')
+                    
+                    details = []
+                    if dist_m and float(dist_m) > 0: details.append(f"{float(dist_m)/1000:.1f} km")
+                    if elev_m and float(elev_m) > 0: details.append(f"{int(float(elev_m))} hm")
+                        
+                    detail_str = f" <i>({', '.join(details)})</i>" if details else ""
+                    events_html += f"<li style='margin-bottom: 4px;'><strong>{r_date_str}</strong>: {r_name}{detail_str}</li>"
+                events_html += "</ul>"
+                st.markdown(events_html, unsafe_allow_html=True)
+            else:
+                st.info("Keine Rennen oder Events im Kalender gefunden.")
 
         # --- WORKOUT LOGIK ---
         uid_val = int(athlete_row['id'])
@@ -1820,13 +1879,22 @@ with tabs[2]:
             str_ftp_t = f"{ftp_t} W" if str(ftp_t) != "-" else "-"
             str_hr_t = f"{stats_trend['Max HR']} bpm" if str(stats_trend['Max HR']) != "-" else "-"
             
-            profile_df_trend = pd.DataFrame([
-                [f"{selected_name_trend}", f"Stand: {datetime.now().strftime('%d.%m.%y')}"],
-                [f"Alter: {stats_trend['Age']}", f"Gewicht: {str_weight_t}"],
-                [f"FTP: {str_ftp_t}", w_kg_t],
-                [f"Max HF: {str_hr_t}", ""]
-            ])
-            st.table(profile_df_trend.set_axis([' ', '  '], axis=1))
+            profile_html_trend = f"""
+            <table style="width: 75%; border-collapse: collapse; font-size: 0.9rem; margin-bottom: 1rem;">
+                <thead>
+                    <tr>
+                        <th style="text-align: left; padding-bottom: 8px; border-bottom: 1px solid #444;">{selected_name_trend}</th>
+                        <th style="text-align: left; padding-bottom: 8px; border-bottom: 1px solid #444;">Stand: {datetime.now().strftime('%d.%m.%y')}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding: 4px 0;">Alter: {stats_trend['Age']}</td><td style="padding: 4px 0;">Gewicht: {str_weight_t}</td></tr>
+                    <tr><td style="padding: 4px 0;">FTP: {str_ftp_t}</td><td style="padding: 4px 0;">{w_kg_t}</td></tr>
+                    <tr><td style="padding: 4px 0;">Max HF: {str_hr_t}</td><td style="padding: 4px 0;"></td></tr>
+                </tbody>
+            </table>
+            """
+            st.markdown(profile_html_trend, unsafe_allow_html=True)
             
         uid_val_trend = int(athlete_row_trend['id'])
         df_workouts_trend = fetch_workouts_from_db(uid_val_trend)
