@@ -1328,148 +1328,150 @@ with tabs[3]:
         default_ftp = 250
         
         if not auth_users.empty:
+            opts_wb = auth_users['name'].tolist()
+            def_idx_wb = opts_wb.index(st.session_state['user']) if st.session_state['user'] in opts_wb else 0
             c_ath1, c_ath2 = st.columns(2)
             with c_ath1:
-                wb_athlete = st.selectbox("Ziel-Account (Für FTP & Upload)", auth_users['name'].tolist(), key="smart_ath_sel")
+                wb_athlete = st.selectbox("Ziel-Account (Upload & FTP)", opts_wb, index=def_idx_wb, key="smart_ath_sel")
             ath_row = auth_users[auth_users['name'] == wb_athlete].iloc[0]
-            stats = get_athlete_stats_from_intervals(ath_row['api_key'], ath_row.get('intervals_id', '0'))
-            if stats.get('FTP') and str(stats['FTP']) != "-":
-                default_ftp = int(stats['FTP'])
+            
+            wb_uid = int(ath_row['id'])
+            if 'ftp_cache' not in st.session_state: 
+                st.session_state['ftp_cache'] = {}
+            if wb_uid not in st.session_state['ftp_cache']:
+                stats = get_athlete_stats_from_intervals(ath_row['api_key'], ath_row.get('intervals_id', '0'))
+                st.session_state['ftp_cache'][wb_uid] = stats.get('FTP', 0)
+                
+            ftp_val = st.session_state['ftp_cache'].get(wb_uid, 0)
+            if ftp_val and str(ftp_val) != "-" and float(ftp_val) > 0:
+                default_ftp = int(float(ftp_val))
+                
             with c_ath2:
-                wb_ftp = st.number_input("Referenz-FTP (Watt)", value=default_ftp, key="smart_ftp")
+                wb_ftp = st.number_input("Referenz-FTP (Watt, via Intervals)", value=default_ftp, disabled=True, key="smart_ftp")
         else:
             wb_ftp = st.number_input("Referenz-FTP (Watt)", value=default_ftp, key="smart_ftp")
-
-        with st.form("smart_builder_form"):
-            st.markdown("##### 1. Block-Zeiten & Intervalle")
-            c1, c2, c3, c4 = st.columns(4)
-            t_ges_target = c1.number_input("Ziel Gesamtzeit (Min) ±3", 1, 300, 50)
-            n_min = c2.number_input("Min Anzahl Intervalle", 1, 50, 5)
-            n_max = c2.number_input("Max Anzahl", 1, 50, 9)
-            t_p_min_str = c3.text_input("Min Pause (mm:ss)", "01:00")
-            t_p_max_str = c3.text_input("Max Pause (mm:ss)", "01:00")
-            t_i_min_str = c4.text_input("Min Intervall (mm:ss)", "00:10")
-            t_i_max_str = c4.text_input("Max Intervall (mm:ss)", "20:00")
             
-            def parse_mmss(val, default):
-                try:
-                    if ':' in val:
-                        m, s = val.split(':')
-                        return int(m) * 60 + int(s)
-                    return int(val)
-                except:
-                    return default
-                    
-            t_p_min = parse_mmss(t_p_min_str, 60)
-            t_p_max = parse_mmss(t_p_max_str, 60)
-            t_i_min = parse_mmss(t_i_min_str, 10)
-            t_i_max = parse_mmss(t_i_max_str, 1200)
-            
-            st.markdown("##### 2. Leistungsvorgaben (Watt)")
-            c5, c6, c7, c8 = st.columns(4)
-            w_i1_min = c5.number_input("Min Start-Watt (1. Int)", 50, 1500, 250)
-            w_i1_max = c5.number_input("Max Start-Watt", 50, 1500, 250)
-            g_min = c6.number_input("Min Steigerung pro Int. (G)", -50, 50, 5)
-            g_max = c6.number_input("Max Steigerung pro Int.", -50, 50, 5)
-            w_p_min = c7.number_input("Min Pausen-Watt", 30, 500, 140)
-            w_p_max = c7.number_input("Max Pausen-Watt", 30, 500, 160)
-            w_avg_min = c8.number_input("Min Ø-Watt (Gesamtblock)", 50, 500, 218)
-            w_avg_max = c8.number_input("Max Ø-Watt", 50, 500, 222)
-            
-            st.markdown("##### 3. Extras")
-            c9, c10 = st.columns(2)
-            wu_dur = c9.number_input("Warmup davor (Min)", 0, 60, 10)
-            cd_dur = c10.number_input("Cooldown danach (Min)", 0, 60, 10)
-            
-            submit_search = st.form_submit_button("🔍 Lösungsraum berechnen", type="primary")
-            
-        if submit_search:
-            import time
-            start_time = time.time()
-            sols = []
-            max_reached = False
-            
-            # Sicherstellen, dass Min <= Max
-            _n_min, _n_max = min(n_min, n_max), max(n_min, n_max)
-            _t_ges_min, _t_ges_max = max(1, t_ges_target - 3), t_ges_target + 3
-            _t_p_min, _t_p_max = min(t_p_min, t_p_max), max(t_p_min, t_p_max)
-            _t_i_min, _t_i_max = min(t_i_min, t_i_max), max(t_i_min, t_i_max)
-            _w_i1_min, _w_i1_max = min(w_i1_min, w_i1_max), max(w_i1_min, w_i1_max)
-            _g_min, _g_max = min(g_min, g_max), max(g_min, g_max)
-            _w_p_min, _w_p_max = min(w_p_min, w_p_max), max(w_p_min, w_p_max)
-            _w_avg_min, _w_avg_max = min(w_avg_min, w_avg_max), max(w_avg_min, w_avg_max)
-            
-            for n in range(int(_n_min), int(_n_max) + 1):
-                if max_reached or time.time() - start_time > 3.0: break
-                for t_ges in range(int(_t_ges_min), int(_t_ges_max) + 1):
-                    if max_reached: break
-                    t_ges_sec = t_ges * 60
-                    for t_p in range(int(_t_p_min), int(_t_p_max) + 1):
-                        if t_p % 5 != 0: continue
-                        t_i = (t_ges_sec - (n - 1) * t_p) / n if n > 1 else t_ges_sec
-                        
-                        if t_i < _t_i_min or t_i > _t_i_max: continue
-                        t_i_rnd = round(t_i, 1)
-                        if t_i_rnd % 5 != 0: continue
-                            
-                        step_w1 = 5 if _w_i1_max > _w_i1_min else 1
-                        for w_i1 in range(int(_w_i1_min), int(_w_i1_max) + 1, step_w1):
-                            if max_reached: break
-                            step_g = 1 if _g_max > _g_min else 1
-                            for G in range(int(_g_min), int(_g_max) + 1, step_g):
-                                step_wp = 5 if _w_p_max > _w_p_min else 1
-                                for w_p in range(int(_w_p_min), int(_w_p_max) + 1, step_wp):
-                                    if n > 1 and t_p > 0:
-                                        W_int = n * w_i1 * t_i + G * t_i * n * (n - 1) / 2
-                                        W_pause = (n - 1) * w_p * t_p
-                                        w_avg_calc = (W_int + W_pause) / t_ges_sec
-                                    elif n == 1:
-                                        w_avg_calc = w_i1
-                                        
-                                    if _w_avg_min <= w_avg_calc <= _w_avg_max:
-                                        score = 0
-                                        if t_i_rnd % 30 == 0: score += 4
-                                        elif t_i_rnd % 15 == 0: score += 2
-                                        elif t_i_rnd % 10 == 0: score += 1
-                                        if t_p % 30 == 0: score += 4
-                                        elif t_p % 15 == 0: score += 2
-                                        elif t_p % 10 == 0: score += 1
-                                        if w_i1 % 10 == 0: score += 2
-                                        elif w_i1 % 5 == 0: score += 1
-                                        if w_p % 10 == 0: score += 2
-                                        elif w_p % 5 == 0: score += 1
-                                        
-                                        sols.append({'n': n, 't_ges': t_ges, 't_i': t_i_rnd, 't_p': t_p, 'w_i1': w_i1, 'G': G, 'w_p': w_p, 'w_avg': int(round(w_avg_calc, 0)), 'score': score})
-                                        if len(sols) >= 1000:
-                                            max_reached = True
-                                            break
-            sols.sort(key=lambda x: x['score'], reverse=True)
-            st.session_state['smart_sols'] = sols[:100]
-            st.session_state['smart_searched'] = True
-            
+        builder_type = st.selectbox("Vorauswahl Intervalltyp", ["Stair", "RSH", "HIT", "LIT", "MIT"])
+        
         sel = None
-        if st.session_state.get('smart_searched'):
-            sols = st.session_state.get('smart_sols', [])
-            if not sols:
-                st.warning("⚠️ Keine Lösung gefunden! Bitte lockere die Toleranzen (z.B. größere Spanne bei Ø-Watt oder Gesamtzeit).")
-            else:
-                st.success(f"✅ {len(sols)} mögliche Kombinationen gefunden (Zeige max. 100). Bitte wähle eine aus der Tabelle aus:")
-                df_sols = pd.DataFrame(sols)
-                df_sols = df_sols.drop(columns=['score'], errors='ignore')
+        if builder_type != "Stair":
+            st.info(f"🚧 Der Intervalltyp '{builder_type}' befindet sich noch in der Entwicklung (TBD).")
+        else:
+            with st.form("smart_builder_form"):
+                st.markdown("##### 1. Block-Zeiten & Intervalle")
+                c1, c2, c3, c4 = st.columns(4)
+                t_ges_target = c1.number_input("Ziel Gesamtzeit (Min) ±3", 1, 300, 50)
+                n_min = c2.number_input("Min Anzahl Intervalle", 1, 50, 5)
+                n_max = c2.number_input("Max Anzahl", 1, 50, 9)
+                t_p_min = c3.number_input("Min Pause (Sek)", 0, 3600, 60, step=30)
+                t_p_max = c3.number_input("Max Pause (Sek)", 0, 3600, 60, step=30)
+                t_i_min = c4.number_input("Min Intervall (Sek)", 10, 3600, 30, step=30)
+                t_i_max = c4.number_input("Max Intervall (Sek)", 10, 3600, 1200, step=30)
                 
-                df_sols['t_i_fmt'] = df_sols['t_i'].apply(lambda x: f"{int(round(x))//60:02d}:{int(round(x))%60:02d}")
-                df_sols['t_p_fmt'] = df_sols['t_p'].apply(lambda x: f"{int(round(x))//60:02d}:{int(round(x))%60:02d}")
+                st.markdown("##### 2. Leistungsvorgaben (Watt)")
+                c5, c6, c7, c8 = st.columns(4)
+                w_i1_min = c5.number_input("Min Start-Watt (1. Int)", 50, 1500, 250)
+                w_i1_max = c5.number_input("Max Start-Watt", 50, 1500, 250)
+                g_min = c6.number_input("Min Steigerung pro Int. (G)", -50, 50, 5)
+                g_max = c6.number_input("Max Steigerung pro Int.", -50, 50, 5)
+                w_p_min = c7.number_input("Min Pausen-Watt", 30, 500, 140)
+                w_p_max = c7.number_input("Max Pausen-Watt", 30, 500, 160)
+                w_avg_min = c8.number_input("Min Ø-Watt (Gesamtblock)", 50, 500, 218)
+                w_avg_max = c8.number_input("Max Ø-Watt", 50, 500, 222)
                 
-                df_sols = df_sols[['t_ges', 'n', 't_i_fmt', 't_p_fmt', 'w_i1', 'G', 'w_p', 'w_avg']]
-                df_sols = df_sols.rename(columns={
-                    't_ges': 'Blockzeit (Min)', 'n': 'Anzahl', 't_i_fmt': 'Intervall', 
-                    't_p_fmt': 'Pause', 'w_i1': 'Start-Watt', 'G': '+ Watt/Int', 
-                    'w_p': 'Pausen-Watt', 'w_avg': 'Ø-Watt'
-                })
+                st.markdown("##### 3. Extras")
+                c9, c10 = st.columns(2)
+                wu_dur = c9.number_input("Warmup davor (Min)", 0, 60, 10)
+                cd_dur = c10.number_input("Cooldown danach (Min)", 0, 60, 10)
                 
-                sel = st.dataframe(df_sols, selection_mode="single-row", on_select="rerun", use_container_width=True, hide_index=True)
+                submit_search = st.form_submit_button("🔍 Lösungsraum berechnen", type="primary")
                 
-    if st.session_state.get('smart_searched') and sel and sel.get("selection", {}).get("rows"):
+            if submit_search:
+                import time
+                start_time = time.time()
+                sols = []
+                max_reached = False
+                
+                # Sicherstellen, dass Min <= Max
+                _n_min, _n_max = min(n_min, n_max), max(n_min, n_max)
+                _t_ges_min, _t_ges_max = max(1, t_ges_target - 3), t_ges_target + 3
+                _t_p_min, _t_p_max = min(t_p_min, t_p_max), max(t_p_min, t_p_max)
+                _t_i_min, _t_i_max = min(t_i_min, t_i_max), max(t_i_min, t_i_max)
+                _w_i1_min, _w_i1_max = min(w_i1_min, w_i1_max), max(w_i1_min, w_i1_max)
+                _g_min, _g_max = min(g_min, g_max), max(g_min, g_max)
+                _w_p_min, _w_p_max = min(w_p_min, w_p_max), max(w_p_min, w_p_max)
+                _w_avg_min, _w_avg_max = min(w_avg_min, w_avg_max), max(w_avg_min, w_avg_max)
+                
+                for n in range(int(_n_min), int(_n_max) + 1):
+                    if max_reached or time.time() - start_time > 3.0: break
+                    for t_ges in range(int(_t_ges_min), int(_t_ges_max) + 1):
+                        if max_reached: break
+                        t_ges_sec = t_ges * 60
+                        for t_p in range(int(_t_p_min), int(_t_p_max) + 1):
+                            if t_p % 5 != 0: continue
+                            t_i = (t_ges_sec - (n - 1) * t_p) / n if n > 1 else t_ges_sec
+                            
+                            if t_i < _t_i_min or t_i > _t_i_max: continue
+                            t_i_rnd = round(t_i, 1)
+                            if t_i_rnd % 5 != 0: continue
+                                
+                            step_w1 = 5 if _w_i1_max > _w_i1_min else 1
+                            for w_i1 in range(int(_w_i1_min), int(_w_i1_max) + 1, step_w1):
+                                if max_reached: break
+                                step_g = 1 if _g_max > _g_min else 1
+                                for G in range(int(_g_min), int(_g_max) + 1, step_g):
+                                    step_wp = 5 if _w_p_max > _w_p_min else 1
+                                    for w_p in range(int(_w_p_min), int(_w_p_max) + 1, step_wp):
+                                        if n > 1 and t_p > 0:
+                                            W_int = n * w_i1 * t_i + G * t_i * n * (n - 1) / 2
+                                            W_pause = (n - 1) * w_p * t_p
+                                            w_avg_calc = (W_int + W_pause) / t_ges_sec
+                                        elif n == 1:
+                                            w_avg_calc = w_i1
+                                            
+                                        if _w_avg_min <= w_avg_calc <= _w_avg_max:
+                                            score = 0
+                                            if t_i_rnd % 30 == 0: score += 4
+                                            elif t_i_rnd % 15 == 0: score += 2
+                                            elif t_i_rnd % 10 == 0: score += 1
+                                            if t_p % 30 == 0: score += 4
+                                            elif t_p % 15 == 0: score += 2
+                                            elif t_p % 10 == 0: score += 1
+                                            if w_i1 % 10 == 0: score += 2
+                                            elif w_i1 % 5 == 0: score += 1
+                                            if w_p % 10 == 0: score += 2
+                                            elif w_p % 5 == 0: score += 1
+                                            
+                                            sols.append({'n': n, 't_ges': t_ges, 't_i': t_i_rnd, 't_p': t_p, 'w_i1': w_i1, 'G': G, 'w_p': w_p, 'w_avg': int(round(w_avg_calc, 0)), 'score': score})
+                                            if len(sols) >= 1000:
+                                                max_reached = True
+                                                break
+                sols.sort(key=lambda x: x['score'], reverse=True)
+                st.session_state['smart_sols'] = sols[:100]
+                st.session_state['smart_searched'] = True
+                
+            if st.session_state.get('smart_searched'):
+                sols = st.session_state.get('smart_sols', [])
+                if not sols:
+                    st.warning("⚠️ Keine Lösung gefunden! Bitte lockere die Toleranzen (z.B. größere Spanne bei Ø-Watt oder Gesamtzeit).")
+                else:
+                    st.success(f"✅ {len(sols)} mögliche Kombinationen gefunden (Zeige max. 100). Bitte wähle eine aus der Tabelle aus:")
+                    df_sols = pd.DataFrame(sols)
+                    df_sols = df_sols.drop(columns=['score'], errors='ignore')
+                    
+                    df_sols['t_i_fmt'] = df_sols['t_i'].apply(lambda x: f"{int(round(x))//60:02d}:{int(round(x))%60:02d}")
+                    df_sols['t_p_fmt'] = df_sols['t_p'].apply(lambda x: f"{int(round(x))//60:02d}:{int(round(x))%60:02d}")
+                    
+                    df_sols = df_sols[['t_ges', 'n', 't_i_fmt', 't_p_fmt', 'w_i1', 'G', 'w_p', 'w_avg']]
+                    df_sols = df_sols.rename(columns={
+                        't_ges': 'Blockzeit (Min)', 'n': 'Anzahl', 't_i_fmt': 'Intervall', 
+                        't_p_fmt': 'Pause', 'w_i1': 'Start-Watt', 'G': '+ Watt/Int', 
+                        'w_p': 'Pausen-Watt', 'w_avg': 'Ø-Watt'
+                    })
+                    
+                    sel = st.dataframe(df_sols, selection_mode="single-row", on_select="rerun", use_container_width=True, hide_index=True)
+                    
+    if builder_type == "Stair" and st.session_state.get('smart_searched') and sel and sel.get("selection", {}).get("rows"):
         with col_wb_right:
             idx = sel["selection"]["rows"][0]
             best_sol = sols[idx]
