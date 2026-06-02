@@ -181,6 +181,11 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
         if target_intervals is None: target_intervals = expected_intervals
         if target_duration is None: target_duration = expected_duration_min
 
+        has_gps = False
+        if 'position_lat' in df.columns and 'position_long' in df.columns:
+            if not df['position_lat'].dropna().empty:
+                has_gps = True
+
         if f"type_{key_suffix}" in st.session_state:
             detected_type = st.session_state[f"type_{key_suffix}"]
         else:
@@ -189,6 +194,8 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
             elif "rennradfahren" in filename.lower() or "radfahren" in filename.lower():
                 detected_type = "Draußen"
             elif any(kw in filename.lower() for kw in ["draußen", "velotour", "rtf", "fahrt"]):
+                detected_type = "Draußen"
+            elif has_gps:
                 detected_type = "Draußen"
             else:
                 detected_type = "UNKNOWN"
@@ -233,11 +240,18 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                 sg_win = 45
                 edge_ignore_sec = 120
         else:
-            c1, _ = st.columns([0.5, 4.5])
+            c1, c2, _ = st.columns([0.5, 0.5, 4.0])
             with c1:
-                pers_equi = st.session_state.get(f"persistent_equi_{key_suffix}", False)
-                equidistant = st.checkbox("Äquidistant (Gleiche Zeitabschnitte)", value=pers_equi, key=f"equi_{key_suffix}")
-                st.session_state[f"persistent_equi_{key_suffix}"] = equidistant
+                pers_auto_chunks = st.session_state.get(f"auto_chunks_{key_suffix}", not has_gps)
+                auto_chunks = st.checkbox("Fahrt in Abschnitte teilen", value=pers_auto_chunks, key=f"chunks_{key_suffix}")
+                st.session_state[f"auto_chunks_{key_suffix}"] = auto_chunks
+            with c2:
+                if auto_chunks:
+                    pers_equi = st.session_state.get(f"persistent_equi_{key_suffix}", False)
+                    equidistant = st.checkbox("Äquidistant (Gleiche Zeitabschnitte)", value=pers_equi, key=f"equi_{key_suffix}")
+                    st.session_state[f"persistent_equi_{key_suffix}"] = equidistant
+                else:
+                    equidistant = False
             expected_intervals = 1
             expected_duration_min = 60
             min_power = default_min_power
@@ -257,227 +271,235 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
             if mode_type == "Automatisch (Algorithmus)":
                 if is_ride_analysis:
                     total_sec = len(df)
-                    if equidistant:
-                        num_chunks = int((total_sec + 1800) // 3600)
-                        if num_chunks < 1: num_chunks = 1
-                        chunk_len = total_sec / num_chunks
-                        if chunk_len < 1200 and num_chunks > 1:
-                            num_chunks -= 1
+                    if auto_chunks:
+                        if equidistant:
+                            num_chunks = int((total_sec + 1800) // 3600)
+                            if num_chunks < 1: num_chunks = 1
                             chunk_len = total_sec / num_chunks
-                        df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
-                        df.loc[df['block_id'] > num_chunks, 'block_id'] = num_chunks
-                    else:
-                        num_full_chunks = total_sec // 3600
-                        remainder = total_sec % 3600
-                        if remainder > 0 and remainder < 1200 and num_full_chunks > 0:
-                            chunk_len = total_sec / num_full_chunks
+                            if chunk_len < 1200 and num_chunks > 1:
+                                num_chunks -= 1
+                                chunk_len = total_sec / num_chunks
                             df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
-                            df.loc[df['block_id'] > num_full_chunks, 'block_id'] = num_full_chunks
+                            df.loc[df['block_id'] > num_chunks, 'block_id'] = num_chunks
                         else:
-                            chunk_len = 3600
-                            df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
-                        
-                    df['is_interval'] = True
-                    num_intervals = df['block_id'].nunique()
-                    expected_intervals = num_intervals
-                    df['highlight'] = df.apply(lambda row: row['power'] if row['block_id'] % 2 != 0 else None, axis=1)
-                    
+                            num_full_chunks = total_sec // 3600
+                            remainder = total_sec % 3600
+                            if remainder > 0 and remainder < 1200 and num_full_chunks > 0:
+                                chunk_len = total_sec / num_full_chunks
+                                df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
+                                df.loc[df['block_id'] > num_full_chunks, 'block_id'] = num_full_chunks
+                            else:
+                                chunk_len = 3600
+                                df['block_id'] = [int(i // chunk_len) + 1 for i in range(total_sec)]
+                            
+                        df['is_interval'] = True
+                        num_intervals = df['block_id'].nunique()
+                        expected_intervals = num_intervals
+                        df['highlight'] = df.apply(lambda row: row['power'] if row['block_id'] % 2 != 0 else None, axis=1)
+                    else:
+                        df['is_interval'] = False
+                        df['block_id'] = 0
+                        num_intervals = 0
+                        expected_intervals = 0
+                        df['highlight'] = None
                 else:
                     deriv_data = df['p_deriv'].fillna(0).values.copy()
-                if edge_ignore_sec > 0 and len(deriv_data) > edge_ignore_sec * 2:
-                    deriv_data[:edge_ignore_sec] = 0
-                    deriv_data[-edge_ignore_sec:] = 0
-                    
-                max_d = np.max(deriv_data)
-                min_d = np.min(deriv_data)
-                
-                best_intervals = []
-                best_thresh_pos = 0
-                best_thresh_neg = 0
-                best_score = -1
-                
-                if target_duration and target_duration > 0 and not match_4020:
-                    # Hybrid-Methode: Erst grob über Rolling Window, dann Kanten per lokaler Ableitung finden
-                    target_sec = int(target_duration * 60)
-                    
-                    # 1. Grobe Erkennung (Plateaus finden)
-                    heavy_smooth = df['p_clean'].rolling(window=15, min_periods=1, center=True).mean()
-                    roll_p = heavy_smooth.rolling(window=target_sec, min_periods=int(target_sec*0.5), center=True).mean()
-                    
-                    valid_centers = roll_p >= min_power
-                    scores = roll_p.fillna(0).values
-                    
-                    candidates = []
-                    for i in range(len(df)):
-                        if not valid_centers.iloc[i]: continue
-                        start_w = max(0, i - target_sec // 2)
-                        end_w = min(len(df), i + target_sec // 2)
-                        if scores[i] == np.max(scores[start_w:end_w]) and scores[i] > 0:
-                            if not candidates or (i - candidates[-1]) > (target_sec * 0.8):
-                                candidates.append(i)
-                                
-                    take_n = target_intervals if target_intervals and target_intervals > 0 else 1
-                    candidates = sorted(candidates, key=lambda x: scores[x], reverse=True)[:take_n]
-                    candidates.sort()
-                    
-                    # 2. Lokale Kantenerkennung mittels Ableitung (+/- Suchradius um die vermutete Kante)
-                    search_radius = min(45, max(15, target_sec // 4)) 
-                    
-                    for center in candidates:
-                        approx_left = max(0, center - (target_sec // 2))
-                        approx_right = min(len(df) - 1, center + (target_sec // 2))
+                    if edge_ignore_sec > 0 and len(deriv_data) > edge_ignore_sec * 2:
+                        deriv_data[:edge_ignore_sec] = 0
+                        deriv_data[-edge_ignore_sec:] = 0
                         
-                        # Linke Kante (pos. Ausschlag der Ableitung)
-                        search_start_l = max(0, approx_left - search_radius)
-                        search_start_r = min(len(df) - 1, approx_left + search_radius)
-                        deriv_window_start = deriv_data[search_start_l:search_start_r]
+                    max_d = np.max(deriv_data)
+                    min_d = np.min(deriv_data)
+                    
+                    best_intervals = []
+                    best_thresh_pos = 0
+                    best_thresh_neg = 0
+                    best_score = -1
+                    
+                    if target_duration and target_duration > 0 and not match_4020:
+                        # Hybrid-Methode: Erst grob über Rolling Window, dann Kanten per lokaler Ableitung finden
+                        target_sec = int(target_duration * 60)
                         
-                        if len(deriv_window_start) > 0 and np.max(deriv_window_start) > max_d * 0.2:
-                            left = search_start_l + np.argmax(deriv_window_start)
-                        else:
-                            left = approx_left
-                            while left < center and heavy_smooth.iloc[left] < min_power - 20: left += 1
-                            while left > 0 and heavy_smooth.iloc[left-1] >= min_power - 20: left -= 1
-
-                        # Rechte Kante (neg. Ausschlag der Ableitung)
-                        search_end_l = max(0, approx_right - search_radius)
-                        search_end_r = min(len(df) - 1, approx_right + search_radius)
-                        deriv_window_end = deriv_data[search_end_l:search_end_r]
+                        # 1. Grobe Erkennung (Plateaus finden)
+                        heavy_smooth = df['p_clean'].rolling(window=15, min_periods=1, center=True).mean()
+                        roll_p = heavy_smooth.rolling(window=target_sec, min_periods=int(target_sec*0.5), center=True).mean()
                         
-                        if len(deriv_window_end) > 0 and np.min(deriv_window_end) < min_d * 0.2:
-                            right = search_end_l + np.argmin(deriv_window_end)
-                        else:
-                            right = approx_right
-                            while right > center and heavy_smooth.iloc[right] < min_power - 20: right -= 1
-                            while right < len(df) - 1 and heavy_smooth.iloc[right+1] >= min_power - 20: right += 1
-                            
-                        # Plausibilität: Wenn durch die Kanten das Intervall massiv beschnitten wird
-                        if left >= right or (right - left) < (target_sec * 0.6):
-                            left = max(0, center - target_sec // 2)
-                            right = min(len(df) - 1, center + target_sec // 2)
-                            
-                        best_intervals.append((left, right))
-                else:
-                    # Original-Logik (Globale Flankenerkennung) primär für 40/20 und "Unbekannt"
-                    for factor in np.arange(0.35, 0.75, 0.05):
-                        thresh_pos = max_d * factor
-                        thresh_neg = min_d * factor
+                        valid_centers = roll_p >= min_power
+                        scores = roll_p.fillna(0).values
                         
-                        is_above = deriv_data > thresh_pos
-                        is_below = deriv_data < thresh_neg
-                        
-                        starts_in = np.where((~is_above[:-1]) & is_above[1:])[0]
-                        starts_out = np.where(is_above[:-1] & (~is_above[1:]))[0]
-                        ends_in = np.where((~is_below[:-1]) & is_below[1:])[0]
-                        ends_out = np.where(is_below[:-1] & (~is_below[1:]))[0]
-                        
-                        start_points = []
-                        for s_in in starts_in:
-                            s_out_cands = starts_out[starts_out > s_in]
-                            if len(s_out_cands) > 0: start_points.append((s_in + s_out_cands[0]) // 2)
-                                
-                        end_points = []
-                        for e_in in ends_in:
-                            e_out_cands = ends_out[ends_out > e_in]
-                            if len(e_out_cands) > 0: end_points.append((e_in + e_out_cands[0]) // 2)
-                                
-                        current_intervals = []
-                        last_end = -1
-                        for sp in start_points:
-                            if sp <= last_end: continue
-                            possible_ends = [ep for ep in end_points if ep > sp]
-                            if possible_ends:
-                                ep = possible_ends[0]
-                                next_starts = [nsp for nsp in start_points if nsp > sp]
-                                if not next_starts or ep < next_starts[0]:
-                                    current_intervals.append((sp, ep))
-                                    last_end = ep
+                        candidates = []
+                        for i in range(len(df)):
+                            if not valid_centers.iloc[i]: continue
+                            start_w = max(0, i - target_sec // 2)
+                            end_w = min(len(df), i + target_sec // 2)
+                            if scores[i] == np.max(scores[start_w:end_w]) and scores[i] > 0:
+                                if not candidates or (i - candidates[-1]) > (target_sec * 0.8):
+                                    candidates.append(i)
                                     
-                        if current_intervals:
-                            durations = [ep - sp for sp, ep in current_intervals]
-                            cv = np.std(durations) / np.mean(durations) if len(durations) > 1 else 0
-                            score = len(current_intervals) * (1 - cv)
+                        take_n = target_intervals if target_intervals and target_intervals > 0 else 1
+                        candidates = sorted(candidates, key=lambda x: scores[x], reverse=True)[:take_n]
+                        candidates.sort()
+                        
+                        # 2. Lokale Kantenerkennung mittels Ableitung (+/- Suchradius um die vermutete Kante)
+                        search_radius = min(45, max(15, target_sec // 4)) 
+                        
+                        for center in candidates:
+                            approx_left = max(0, center - (target_sec // 2))
+                            approx_right = min(len(df) - 1, center + (target_sec // 2))
                             
-                            if target_intervals and target_intervals > 0 and not match_4020:
-                                count_diff = abs(len(current_intervals) - target_intervals)
-                                if count_diff == 0:
-                                    score += 1000
-                                else:
-                                    score -= count_diff * 10
+                            # Linke Kante (pos. Ausschlag der Ableitung)
+                            search_start_l = max(0, approx_left - search_radius)
+                            search_start_r = min(len(df) - 1, approx_left + search_radius)
+                            deriv_window_start = deriv_data[search_start_l:search_start_r]
+                            
+                            if len(deriv_window_start) > 0 and np.max(deriv_window_start) > max_d * 0.2:
+                                left = search_start_l + np.argmax(deriv_window_start)
+                            else:
+                                left = approx_left
+                                while left < center and heavy_smooth.iloc[left] < min_power - 20: left += 1
+                                while left > 0 and heavy_smooth.iloc[left-1] >= min_power - 20: left -= 1
+    
+                            # Rechte Kante (neg. Ausschlag der Ableitung)
+                            search_end_l = max(0, approx_right - search_radius)
+                            search_end_r = min(len(df) - 1, approx_right + search_radius)
+                            deriv_window_end = deriv_data[search_end_l:search_end_r]
+                            
+                            if len(deriv_window_end) > 0 and np.min(deriv_window_end) < min_d * 0.2:
+                                right = search_end_l + np.argmin(deriv_window_end)
+                            else:
+                                right = approx_right
+                                while right > center and heavy_smooth.iloc[right] < min_power - 20: right -= 1
+                                while right < len(df) - 1 and heavy_smooth.iloc[right+1] >= min_power - 20: right += 1
+                                
+                            # Plausibilität: Wenn durch die Kanten das Intervall massiv beschnitten wird
+                            if left >= right or (right - left) < (target_sec * 0.6):
+                                left = max(0, center - target_sec // 2)
+                                right = min(len(df) - 1, center + target_sec // 2)
+                                
+                            best_intervals.append((left, right))
+                    else:
+                        # Original-Logik (Globale Flankenerkennung) primär für 40/20 und "Unbekannt"
+                        for factor in np.arange(0.35, 0.75, 0.05):
+                            thresh_pos = max_d * factor
+                            thresh_neg = min_d * factor
+                            
+                            is_above = deriv_data > thresh_pos
+                            is_below = deriv_data < thresh_neg
+                            
+                            starts_in = np.where((~is_above[:-1]) & is_above[1:])[0]
+                            starts_out = np.where(is_above[:-1] & (~is_above[1:]))[0]
+                            ends_in = np.where((~is_below[:-1]) & is_below[1:])[0]
+                            ends_out = np.where(is_below[:-1] & (~is_below[1:]))[0]
+                            
+                            start_points = []
+                            for s_in in starts_in:
+                                s_out_cands = starts_out[starts_out > s_in]
+                                if len(s_out_cands) > 0: start_points.append((s_in + s_out_cands[0]) // 2)
                                     
-                            if target_duration and target_duration > 0 and not match_4020:
-                                target_sec = target_duration * 60
-                                avg_dur = np.mean(durations)
-                                if abs(avg_dur - target_sec) > (target_sec * 0.3):
-                                    score -= 50
-
-                            if score > best_score:
-                                best_score = score
-                                best_intervals = current_intervals
-                                best_thresh_pos = thresh_pos
-                                best_thresh_neg = thresh_neg
-                
-                st.session_state[f'best_thresh_pos_{key_suffix}'] = best_thresh_pos
-                st.session_state[f'best_thresh_neg_{key_suffix}'] = best_thresh_neg
-                
-                # Wenn Algorithmus zu viele Intervalle findet, die Schwächsten verwerfen
-                if best_intervals and target_intervals and target_intervals > 0 and not match_4020:
-                    if len(best_intervals) > target_intervals:
-                        scored_intervals = []
-                        for sp, ep in best_intervals:
-                            mean_p = df['p_clean'].iloc[sp:ep+1].mean()
-                            scored_intervals.append((mean_p, sp, ep))
-                        scored_intervals.sort(key=lambda x: x[0], reverse=True)
-                        best_intervals = [(sp, ep) for _, sp, ep in scored_intervals[:target_intervals]]
-                        best_intervals.sort(key=lambda x: x[0])
-
-                interval_nums = {}
-                if best_intervals:
-                    macro_blocks = []
-                    current_macro = [best_intervals[0]]
-                    for sp, ep in best_intervals[1:]:
-                        if (sp - current_macro[-1][1]) <= 45:
-                            current_macro.append((sp, ep))
-                        else:
-                            macro_blocks.append(current_macro)
-                            current_macro = [(sp, ep)]
-                    macro_blocks.append(current_macro)
+                            end_points = []
+                            for e_in in ends_in:
+                                e_out_cands = ends_out[ends_out > e_in]
+                                if len(e_out_cands) > 0: end_points.append((e_in + e_out_cands[0]) // 2)
+                                    
+                            current_intervals = []
+                            last_end = -1
+                            for sp in start_points:
+                                if sp <= last_end: continue
+                                possible_ends = [ep for ep in end_points if ep > sp]
+                                if possible_ends:
+                                    ep = possible_ends[0]
+                                    next_starts = [nsp for nsp in start_points if nsp > sp]
+                                    if not next_starts or ep < next_starts[0]:
+                                        current_intervals.append((sp, ep))
+                                        last_end = ep
+                                        
+                            if current_intervals:
+                                durations = [ep - sp for sp, ep in current_intervals]
+                                cv = np.std(durations) / np.mean(durations) if len(durations) > 1 else 0
+                                score = len(current_intervals) * (1 - cv)
+                                
+                                if target_intervals and target_intervals > 0 and not match_4020:
+                                    count_diff = abs(len(current_intervals) - target_intervals)
+                                    if count_diff == 0:
+                                        score += 1000
+                                    else:
+                                        score -= count_diff * 10
+                                        
+                                if target_duration and target_duration > 0 and not match_4020:
+                                    target_sec = target_duration * 60
+                                    avg_dur = np.mean(durations)
+                                    if abs(avg_dur - target_sec) > (target_sec * 0.3):
+                                        score -= 50
+    
+                                if score > best_score:
+                                    best_score = score
+                                    best_intervals = current_intervals
+                                    best_thresh_pos = thresh_pos
+                                    best_thresh_neg = thresh_neg
                     
-                    is_micro = len(macro_blocks) < len(best_intervals)
-                    b_id = 1
-                    for m_idx, macro in enumerate(macro_blocks, start=1):
-                        for u_idx, (sp, ep) in enumerate(macro, start=1):
-                            interval_nums[b_id] = (m_idx * 100 + u_idx) if is_micro else m_idx
-                            b_id += 1
-                else:
+                    st.session_state[f'best_thresh_pos_{key_suffix}'] = best_thresh_pos
+                    st.session_state[f'best_thresh_neg_{key_suffix}'] = best_thresh_neg
+                    
+                    # Wenn Algorithmus zu viele Intervalle findet, die Schwächsten verwerfen
+                    if best_intervals and target_intervals and target_intervals > 0 and not match_4020:
+                        if len(best_intervals) > target_intervals:
+                            scored_intervals = []
+                            for sp, ep in best_intervals:
+                                mean_p = df['p_clean'].iloc[sp:ep+1].mean()
+                                scored_intervals.append((mean_p, sp, ep))
+                            scored_intervals.sort(key=lambda x: x[0], reverse=True)
+                            best_intervals = [(sp, ep) for _, sp, ep in scored_intervals[:target_intervals]]
+                            best_intervals.sort(key=lambda x: x[0])
+    
+                    interval_nums = {}
                     is_micro = False
+                    if best_intervals:
+                        if detected_type == "HIT 40/20" or match_4020:
+                            macro_blocks = []
+                            current_macro = [best_intervals[0]]
+                            for sp, ep in best_intervals[1:]:
+                                if (sp - current_macro[-1][1]) <= 45:
+                                    current_macro.append((sp, ep))
+                                else:
+                                    macro_blocks.append(current_macro)
+                                    current_macro = [(sp, ep)]
+                            macro_blocks.append(current_macro)
+                            is_micro = len(macro_blocks) < len(best_intervals)
+                        else:
+                            macro_blocks = [[intv] for intv in best_intervals]
                             
-                is_int = [False] * len(df)
-                block = [0] * len(df)
-                b_id_counter = 1
-                if best_intervals:
-                    for macro in macro_blocks:
-                        for sp, ep in macro:
-                            for j in range(sp, ep + 1):
-                                is_int[j] = True
-                                block[j] = b_id_counter
-                            b_id_counter += 1
-                
-                df['is_interval'] = is_int
-                df['block_id'] = block
-                
-                if is_micro:
-                    expected_intervals = len(macro_blocks)
-                    macro_durs = [(macro[-1][1] - macro[0][0]) for macro in macro_blocks]
-                    st.session_state[f'auto_dur_sec_{key_suffix}'] = int(sum(macro_durs) / len(macro_durs))
-                    expected_duration_min = max(1, int((st.session_state[f'auto_dur_sec_{key_suffix}'] + 30) // 60))
-                else:
-                    expected_intervals = len(best_intervals)
-                    st.session_state[f'auto_dur_sec_{key_suffix}'] = int(round(sum(ep - sp for sp, ep in best_intervals) / len(best_intervals))) if best_intervals else 0
-                    expected_duration_min = max(1, int((st.session_state[f'auto_dur_sec_{key_suffix}'] + 30) // 60))
+                        b_id = 1
+                        for m_idx, macro in enumerate(macro_blocks, start=1):
+                            for u_idx, (sp, ep) in enumerate(macro, start=1):
+                                interval_nums[b_id] = (m_idx * 100 + u_idx) if is_micro else b_id
+                                b_id += 1
+                                
+                    is_int = [False] * len(df)
+                    block = [0] * len(df)
+                    b_id_counter = 1
+                    if best_intervals:
+                        for macro in macro_blocks:
+                            for sp, ep in macro:
+                                for j in range(sp, ep + 1):
+                                    is_int[j] = True
+                                    block[j] = b_id_counter
+                                b_id_counter += 1
                     
-                num_intervals = expected_intervals
-                df['highlight'] = df.apply(lambda row: row['power'] if row['is_interval'] else None, axis=1)
+                    df['is_interval'] = is_int
+                    df['block_id'] = block
+                    
+                    if is_micro:
+                        expected_intervals = len(macro_blocks)
+                        macro_durs = [(macro[-1][1] - macro[0][0]) for macro in macro_blocks]
+                        st.session_state[f'auto_dur_sec_{key_suffix}'] = int(sum(macro_durs) / len(macro_durs))
+                        expected_duration_min = max(1, int((st.session_state[f'auto_dur_sec_{key_suffix}'] + 30) // 60))
+                    else:
+                        expected_intervals = len(best_intervals)
+                        st.session_state[f'auto_dur_sec_{key_suffix}'] = int(round(sum(ep - sp for sp, ep in best_intervals) / len(best_intervals))) if best_intervals else 0
+                        expected_duration_min = max(1, int((st.session_state[f'auto_dur_sec_{key_suffix}'] + 30) // 60))
+                        
+                    num_intervals = expected_intervals
+                    df['highlight'] = df.apply(lambda row: row['power'] if row['is_interval'] else None, axis=1)
             else:
                 df['is_interval'] = False
                 df['block_id'] = 0
@@ -582,37 +604,42 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                         "Dauer_sec": len(block_df) 
                     })
             
-            metadata = None
-            if intervals_calculated:
-                n_ints = len(intervals_calculated)
-                int_avg_power = int(round(sum(i["Ø Watt"] for i in intervals_calculated) / n_ints))
-                int_avg_hr = int(round(sum(i["Ø HF"] for i in intervals_calculated) / n_ints))
-                int_avg_eff = float(round(sum(i["Efficiency"] for i in intervals_calculated) / n_ints, 2))
-                
-                workout_date = df.index.min().strftime('%Y-%m-%d')
-                
-                final_filename = filename
-                if not match_structure:
-                    final_filename = f"{detected_type} {workout_structure}"
-                    ignore_names = ["fahrt", "ride", "morning ride", "afternoon ride", "lunch ride", "evening ride", "radfahren", "rennradfahren", "unbenannte fahrt", "unbekannt"]
-                    if filename and not any(ign in filename.lower() for ign in ignore_names):
-                        final_filename += f" - {filename}"
-                
-                metadata = {
-                    "filename": final_filename, 
-                    "date": workout_date, 
-                    "type": detected_type, 
-                    "structure": workout_structure, 
-                    "avg_power": overall_avg_p, 
-                    "max_power": overall_max_p,
-                    "intervals_activity_id": selected_activity_id,
-                    "user_id": active_user_id,
-                    "int_avg_power": int_avg_power,
-                    "int_avg_hr": int_avg_hr,
-                    "int_avg_eff": int_avg_eff,
-                    "int_count": expected_intervals if not is_ride_analysis else None,
-                    "int_length": expected_duration_min if not is_ride_analysis else None
-                }
+            n_ints = len(intervals_calculated)
+            int_avg_power = int(round(sum(i["Ø Watt"] for i in intervals_calculated) / n_ints)) if n_ints > 0 else None
+            int_avg_hr = int(round(sum(i["Ø HF"] for i in intervals_calculated) / n_ints)) if n_ints > 0 else None
+            int_avg_eff = float(round(sum(i["Efficiency"] for i in intervals_calculated) / n_ints, 2)) if n_ints > 0 else None
+            
+            workout_date = df.index.min().strftime('%Y-%m-%d')
+            
+            if not is_ride_analysis and detected_type != "HIT 40/20" and n_ints > 0:
+                durations_min = [max(1, int(round(i["Dauer_sec"] / 60.0))) for i in intervals_calculated]
+                if len(set(durations_min)) > 1:
+                    workout_structure = f"{n_ints}x{'-'.join(map(str, durations_min))}"
+                else:
+                    workout_structure = f"{n_ints}x{durations_min[0]}"
+            
+            final_filename = filename
+            if not match_structure:
+                final_filename = f"{detected_type} {workout_structure}"
+                ignore_names = ["fahrt", "ride", "morning ride", "afternoon ride", "lunch ride", "evening ride", "radfahren", "rennradfahren", "unbenannte fahrt", "unbekannt"]
+                if filename and not any(ign in filename.lower() for ign in ignore_names):
+                    final_filename += f" - {filename}"
+            
+            metadata = {
+                "filename": final_filename, 
+                "date": workout_date, 
+                "type": detected_type, 
+                "structure": workout_structure, 
+                "avg_power": overall_avg_p, 
+                "max_power": overall_max_p,
+                "intervals_activity_id": selected_activity_id,
+                "user_id": active_user_id,
+                "int_avg_power": int_avg_power,
+                "int_avg_hr": int_avg_hr,
+                "int_avg_eff": int_avg_eff,
+                "int_count": expected_intervals if not is_ride_analysis and n_ints > 0 else None,
+                "int_length": int(round(sum(durations_min)/len(durations_min))) if not is_ride_analysis and n_ints > 0 and 'durations_min' in locals() else (expected_duration_min if not is_ride_analysis and n_ints > 0 else None)
+            }
 
             # --- RENDER INTERVAL UI & BUTTONS ---
             with col_i:
@@ -663,7 +690,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                     st.markdown(f'<div style="font-size: 14px; color: rgb(163, 168, 184); margin-bottom: 2px;">Modus</div><div style="font-size: 1.65rem; font-weight: bold; line-height: 1.2; color: #3399FF;">Ride Analysis</div>', unsafe_allow_html=True)
             
             with col_btn_save:
-                if metadata and intervals_calculated:
+                if metadata:
                     st.markdown("<div style='margin-top: 1.8rem;'></div>", unsafe_allow_html=True)
                     if st.session_state.get('overwrite_warning'):
                         st.warning("Bereits in DB. Überschreiben?")
@@ -683,7 +710,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                         st.warning(f"Achtung Abweichung. Speichern?")
                         if st.button("Ja", type="primary", key=f"yes_mis_{key_suffix}", use_container_width=True):
                             st.session_state['interval_mismatch_warning'] = False
-                            dup_id = check_duplicate_workout(workout_date, detected_type, workout_structure, active_user_id, selected_activity_id)
+                            dup_id = check_duplicate_workout(workout_date, detected_type, metadata['structure'], active_user_id, selected_activity_id)
                             if dup_id: 
                                 st.session_state['overwrite_warning'] = True
                                 st.session_state['workout_to_overwrite'] = dup_id
@@ -713,7 +740,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                                 st.session_state['interval_mismatch_warning'] = True
                                 st.rerun()
                             else:
-                                dup_id = check_duplicate_workout(workout_date, detected_type, workout_structure, active_user_id, selected_activity_id)
+                                dup_id = check_duplicate_workout(workout_date, detected_type, metadata['structure'], active_user_id, selected_activity_id)
                                 if dup_id: 
                                     st.session_state['overwrite_warning'] = True
                                     st.session_state['workout_to_overwrite'] = dup_id
@@ -738,10 +765,10 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                                 st.rerun()
 
             with col_btn_adj:
-                if intervals_calculated or mode_type == "Manuell (Grafische Auswahl)" or is_ride_analysis:
+                if True:
                     st.markdown("<div style='margin-top: 1.8rem;'></div>", unsafe_allow_html=True)
                     if mode_type == "Automatisch (Algorithmus)" and is_admin:
-                        auto_blocks_timestamps = [(df[df['block_id'] == b].index.min(), df[df['block_id'] == b].index.max()) for b in df[df['is_interval']]['block_id'].unique()]
+                        auto_blocks_timestamps = [(df[df['block_id'] == b].index.min(), df[df['block_id'] == b].index.max()) for b in df[df['is_interval']]['block_id'].unique() if b > 0]
                         if is_ride_analysis:
                             st.button("⚙️ Manuelle Intervalle markieren", on_click=transfer_to_manual, args=(auto_blocks_timestamps,), use_container_width=True, key=f"adj_{key_suffix}")
                         else:
@@ -1239,6 +1266,41 @@ def download_original_fit_file(api_key, activity_id):
         return None, f"Fehler {response.status_code}"
     except Exception as e: return None, str(e)
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_activity_df(act_id, api_key):
+    """Lädt DataFrame bevorzugt aus Parquet. Falls nicht vorhanden, via FIT-Download und lädt neues Parquet hoch."""
+    if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
+        try:
+            from supabase import create_client
+            sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+            res_bytes = sb.storage.from_("workouts").download(f"workout_{act_id}.parquet")
+            return pd.read_parquet(io.BytesIO(res_bytes))
+        except Exception:
+            pass
+            
+    bin_data, _ = download_original_fit_file(api_key, act_id)
+    if bin_data:
+        try:
+            fitfile = fitparse.FitFile(io.BytesIO(bin_data))
+            df_fit = pd.DataFrame([r.get_values() for r in fitfile.get_messages('record')])
+            if not df_fit.empty and 'timestamp' in df_fit.columns:
+                df_fit['timestamp'] = pd.to_datetime(df_fit['timestamp'])
+                df_fit.set_index('timestamp', inplace=True)
+                if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
+                    try:
+                        for col in df_fit.columns:
+                            if df_fit[col].dtype == 'object': df_fit[col] = df_fit[col].astype(str)
+                        parquet_buffer = io.BytesIO()
+                        df_fit.to_parquet(parquet_buffer, engine='pyarrow', index=True)
+                        parquet_buffer.seek(0)
+                        from supabase import create_client
+                        sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+                        sb.storage.from_("workouts").upload(f"workout_{act_id}.parquet", parquet_buffer.read(), {"content-type": "application/octet-stream"})
+                    except Exception: pass
+                return df_fit
+        except Exception: pass
+    return pd.DataFrame()
+
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_upcoming_events(api_key, athlete_id):
     if pd.isna(athlete_id) or str(athlete_id).strip() in ["", "None", "nan"]:
@@ -1652,6 +1714,86 @@ if len(tabs) > 5:
                         st.cache_data.clear()
                         st.success(f"Athlet {del_name} wurde gelöscht.")
                         st.rerun()
+            
+            st.markdown("---")
+            st.markdown("### ⚡ Migration: Historische Daten zu Parquet")
+            st.info("Lädt fehlende FIT-Dateien über die Intervals-API, parst sie und speichert sie als blitzschnelle Parquet-Dateien im Supabase Storage Bucket 'workouts'.")
+            
+            if st.button("Start Parquet Migration", use_container_width=True):
+                if "SUPABASE_URL" not in st.secrets or "SUPABASE_KEY" not in st.secrets:
+                    st.error("Bitte füge SUPABASE_URL und SUPABASE_KEY in deine st.secrets (secrets.toml) ein!")
+                else:
+                    from supabase import create_client
+                    sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+                    
+                    conn = get_db_connection()
+                    workouts = conn.query("SELECT id, intervals_activity_id, user_id FROM workouts WHERE intervals_activity_id IS NOT NULL", ttl=0)
+                    
+                    if workouts.empty:
+                        st.info("Keine Workouts mit Cloud-IDs gefunden.")
+                    else:
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        try:
+                            existing_files_res = sb.storage.from_("workouts").list()
+                            existing_files = [f["name"] for f in existing_files_res] if existing_files_res else []
+                        except Exception as e:
+                            existing_files = []
+                            st.warning(f"Konnte bestehende Dateien nicht abrufen (Bucket 'workouts' nicht gefunden?): {e}")
+
+                        success_count = 0
+                        error_count = 0
+                        df_all_users = load_all_athletes()
+                        api_keys = dict(zip(df_all_users['id'], df_all_users['api_key']))
+                        total = len(workouts)
+                        
+                        for idx, row in workouts.iterrows():
+                            act_id = str(row['intervals_activity_id'])
+                            uid = row['user_id']
+                            file_name = f"workout_{act_id}.parquet"
+                            
+                            if file_name in existing_files:
+                                success_count += 1
+                            else:
+                                status_text.write(f"Verarbeite Workout {idx+1}/{total} (ID: {act_id})...")
+                                api_k = api_keys.get(uid)
+                                if api_k:
+                                    bin_data, _ = download_original_fit_file(api_k, act_id)
+                                    if bin_data:
+                                        try:
+                                            fitfile = fitparse.FitFile(io.BytesIO(bin_data))
+                                            df_fit = pd.DataFrame([r.get_values() for r in fitfile.get_messages('record')])
+                                            if not df_fit.empty and 'timestamp' in df_fit.columns:
+                                                df_fit['timestamp'] = pd.to_datetime(df_fit['timestamp'])
+                                                df_fit.set_index('timestamp', inplace=True)
+                                                
+                                                # Fix für PyArrow: Alle komplexen Objekte in Strings umwandeln
+                                                for col in df_fit.columns:
+                                                    if df_fit[col].dtype == 'object':
+                                                        df_fit[col] = df_fit[col].astype(str)
+                                                
+                                                parquet_buffer = io.BytesIO()
+                                                df_fit.to_parquet(parquet_buffer, engine='pyarrow', index=True)
+                                                parquet_buffer.seek(0)
+                                                
+                                                sb.storage.from_("workouts").upload(file_name, parquet_buffer.read(), {"content-type": "application/octet-stream"})
+                                                success_count += 1
+                                            else: 
+                                                st.warning(f"Workout {act_id} hat keine Zeitstempel (Leer).")
+                                                error_count += 1
+                                        except Exception as e: 
+                                            st.error(f"Fehler bei Workout {act_id}: {e}")
+                                            error_count += 1
+                                    else: 
+                                        st.warning(f"Konnte FIT-Datei für {act_id} nicht herunterladen.")
+                                        error_count += 1
+                                else: 
+                                    st.warning(f"Kein API Key für User ID {uid} gefunden.")
+                                    error_count += 1
+                            progress_bar.progress((idx + 1) / total)
+                            
+                        status_text.write(f"✅ Migration abgeschlossen! {success_count} erfolgreich, {error_count} Fehler.")
         else:
             st.error("Zugriff verweigert! Nur für den Administrator.")
 
@@ -1672,15 +1814,9 @@ if len(tabs) > 6:
                     
                     if st.session_state.get('bulk_loaded_idx') != b_idx:
                         with st.spinner("Lade Workout..."):
-                            bin_data, _ = download_original_fit_file(st.session_state['bulk_api_k'], current_target['ID'])
-                            if bin_data:
+                            b_df = get_activity_df(current_target['ID'], st.session_state['bulk_api_k'])
+                            if not b_df.empty:
                                 try:
-                                    fitfile = fitparse.FitFile(io.BytesIO(bin_data))
-                                    records = [r.get_values() for r in fitfile.get_messages('record')]
-                                    b_df = pd.DataFrame(records)
-                                    if not b_df.empty and 'timestamp' in b_df.columns:
-                                        b_df['timestamp'] = pd.to_datetime(b_df['timestamp'])
-                                        b_df.set_index('timestamp', inplace=True)
                                     st.session_state['bulk_df'] = b_df
                                     st.session_state['bulk_loaded_idx'] = b_idx
                                     st.session_state['erfassungs_modus'] = "Automatisch (Algorithmus)"
@@ -1691,7 +1827,7 @@ if len(tabs) > 6:
                                     st.session_state['bulk_index'] += 1
                                     st.rerun()
                             else:
-                                st.error("Fehler beim Download. Überspringe...")
+                                st.error("Fehler beim Laden der Daten. Überspringe...")
                                 st.session_state['bulk_index'] += 1
                                 st.rerun()
                                 
@@ -1905,12 +2041,9 @@ with tabs[0]:
                         selected_activity_id = df_cockpit.iloc[idx]["ID"]
                         filename = df_cockpit.iloc[idx]["Name"]
                         with st.spinner("Lade Workout..."):
-                            bin_data, _ = download_original_fit_file(api_k, selected_activity_id)
-                            if bin_data:
-                                fitfile = fitparse.FitFile(io.BytesIO(bin_data))
-                                st.session_state['df'] = pd.DataFrame([r.get_values() for r in fitfile.get_messages('record')])
-                                st.session_state['df']['timestamp'] = pd.to_datetime(st.session_state['df']['timestamp'])
-                                st.session_state['df'].set_index('timestamp', inplace=True)
+                            df_fetched = get_activity_df(selected_activity_id, api_k)
+                            if not df_fetched.empty:
+                                st.session_state['df'] = df_fetched
                 else:
                     st.info("Keine Aktivitäten passend zu den Filtern gefunden.")
         elif err:
@@ -2205,20 +2338,61 @@ with tabs[1]:
                             display_df = pd.DataFrame()
                             display_df['Int.'] = sub_df['interval_num'].apply(lambda x: f"Block {x//100} - {x%100:02d}" if x > 100 else str(x))
                             display_df['Ø W'] = sub_df['avg_power']
-                            display_df['Ø HF'] = sub_df['avg_hr']
+                            
+                            has_max_hr = str(stats['Max HR']).isdigit() and int(stats['Max HR']) > 0
+                            max_hr_val = int(stats['Max HR']) if has_max_hr else 1
+                            
+                            if has_max_hr:
+                                display_df['Ø HF %'] = sub_df['avg_hr'] / max_hr_val * 100
+                            else:
+                                display_df['Ø HF'] = sub_df['avg_hr']
                             
                             if "Eff." in optional_cols: display_df['Eff.'] = sub_df['intervall_eff'] if 'intervall_eff' in sub_df.columns else 0
                             if "Max HF %" in optional_cols: 
-                                if str(stats['Max HR']).isdigit() and int(stats['Max HR']) > 0:
-                                    display_df['Max HF %'] = sub_df['max_hr'] / int(stats['Max HR']) * 100
+                                if has_max_hr:
+                                    display_df['Max HF %'] = sub_df['max_hr'] / max_hr_val * 100
                                 else:
-                                    display_df['Max HF %'] = 0
+                                    display_df['Max HF'] = sub_df['max_hr']
                             if "± HF" in optional_cols: display_df['± HF'] = sub_df['std_hr'] if 'std_hr' in sub_df.columns else 0
                             if "Dauer" in optional_cols: display_df['Dauer'] = sub_df['duration_sec'].apply(lambda x: f"{int(x // 60):02d}:{int(x % 60):02d}")
                             
-                            format_dict = {"Ø W": "{:.0f}", "Ø HF": "{:.0f}"}
+                            # Average Row hinzufügen
+                            avg_row = {"Int.": "Ø Gesamt"}
+                            avg_row["Ø W"] = sub_df['avg_power'].mean()
+                            
+                            if has_max_hr:
+                                avg_row["Ø HF %"] = display_df['Ø HF %'].mean()
+                            else:
+                                avg_row["Ø HF"] = sub_df['avg_hr'].mean()
+                                
+                            if "Eff." in optional_cols:
+                                avg_row["Eff."] = sub_df['intervall_eff'].mean() if 'intervall_eff' in sub_df.columns else 0
+                            if "Max HF %" in optional_cols:
+                                if has_max_hr:
+                                    avg_row["Max HF %"] = display_df['Max HF %'].mean()
+                                else:
+                                    avg_row["Max HF"] = sub_df['max_hr'].mean()
+                            if "± HF" in optional_cols:
+                                avg_row["± HF"] = sub_df['std_hr'].mean() if 'std_hr' in sub_df.columns else 0
+                            if "Dauer" in optional_cols:
+                                mean_dur = sub_df['duration_sec'].mean()
+                                avg_row["Dauer"] = f"{int(mean_dur // 60):02d}:{int(mean_dur % 60):02d}"
+                                
+                            display_df = pd.concat([display_df, pd.DataFrame([avg_row])], ignore_index=True)
+
+                            format_dict = {"Ø W": "{:.0f}"}
+                            if has_max_hr:
+                                format_dict["Ø HF %"] = "{:.0f} %"
+                            else:
+                                format_dict["Ø HF"] = "{:.0f}"
+                                
                             if "Eff." in optional_cols: format_dict["Eff."] = "{:.2f}"
-                            if "Max HF %" in optional_cols: format_dict["Max HF %"] = "{:.0f} %"
+                            if "Max HF %" in optional_cols: 
+                                if has_max_hr:
+                                    format_dict["Max HF %"] = "{:.0f} %"
+                                else:
+                                    format_dict["Max HF"] = "{:.0f}"
+                            if "± HF" in optional_cols: format_dict["± HF"] = "{:.1f}"
                             
                             styled_df = display_df.style.format(format_dict).set_properties(**{'text-align': 'center'}).set_table_styles([{'selector': 'th', 'props': [('text-align', 'center')]}])
                             
@@ -2238,12 +2412,9 @@ with tabs[1]:
                                 act_id = sub_df['intervals_activity_id'].iloc[0] if 'intervals_activity_id' in sub_df.columns else None
                                 
                                 if pd.notna(act_id) and str(act_id).strip() != "" and str(act_id) != "None":
-                                    bin_data, _ = download_original_fit_file(athlete_row['api_key'], act_id)
-                                    if bin_data:
+                                    df_map_live = get_activity_df(act_id, athlete_row['api_key'])
+                                    if not df_map_live.empty:
                                         try:
-                                            fitfile = fitparse.FitFile(io.BytesIO(bin_data))
-                                            records = [r.get_values() for r in fitfile.get_messages('record')]
-                                            df_map_live = pd.DataFrame(records)
                                             
                                             if 'position_lat' in df_map_live.columns and 'position_long' in df_map_live.columns:
                                                 df_map_live = df_map_live.dropna(subset=['position_lat', 'position_long'])
@@ -2270,7 +2441,7 @@ with tabs[1]:
                                         except Exception as e:
                                             st.error(f"Fehler beim Laden der Karte für {w}: {e}")
                                     else:
-                                        st.warning(f"Konnte die FIT-Datei für {w} nicht aus der Cloud laden.")
+                                        st.warning(f"Konnte die Daten für {w} nicht aus der Cloud laden.")
                                 else:
                                     st.info(f"Das Workout '{w}' hat keine verknüpfte Cloud-ID (wurde vermutlich lokal importiert).")
                 else:
