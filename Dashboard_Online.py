@@ -1364,16 +1364,20 @@ with tabs[3]:
                 n_min = c2.number_input("Min Anzahl Intervalle", 1, 50, 5)
                 n_max = c2.number_input("Max Anzahl", 1, 50, 9)
                 
-                from datetime import time as dt_time
-                t_p_min_val = c3.time_input("Min Pause (mm:ss)", value=dt_time(0, 1, 0), step=30)
-                t_p_max_val = c3.time_input("Max Pause (mm:ss)", value=dt_time(0, 1, 0), step=30)
-                t_i_min_val = c4.time_input("Min Intervall (mm:ss)", value=dt_time(0, 0, 30), step=30)
-                t_i_max_val = c4.time_input("Max Intervall (mm:ss)", value=dt_time(0, 20, 0), step=30)
+                time_opts = [f"{m:02d}:{s:02d}" for m in range(61) for s in (0, 30)][:-1]
+                t_p_min_str = c3.selectbox("Min Pause (mm:ss)", time_opts, index=time_opts.index("01:00"))
+                t_p_max_str = c3.selectbox("Max Pause (mm:ss)", time_opts, index=time_opts.index("01:00"))
+                t_i_min_str = c4.selectbox("Min Intervall (mm:ss)", time_opts, index=time_opts.index("00:30"))
+                t_i_max_str = c4.selectbox("Max Intervall (mm:ss)", time_opts, index=time_opts.index("20:00"))
                 
-                t_p_min = t_p_min_val.hour * 3600 + t_p_min_val.minute * 60 + t_p_min_val.second
-                t_p_max = t_p_max_val.hour * 3600 + t_p_max_val.minute * 60 + t_p_max_val.second
-                t_i_min = t_i_min_val.hour * 3600 + t_i_min_val.minute * 60 + t_i_min_val.second
-                t_i_max = t_i_max_val.hour * 3600 + t_i_max_val.minute * 60 + t_i_max_val.second
+                def parse_mmss(val):
+                    m, s = val.split(':')
+                    return int(m) * 60 + int(s)
+                    
+                t_p_min = parse_mmss(t_p_min_str)
+                t_p_max = parse_mmss(t_p_max_str)
+                t_i_min = parse_mmss(t_i_min_str)
+                t_i_max = parse_mmss(t_i_max_str)
                 
                 st.markdown("##### 2. Leistungsvorgaben (Watt)")
                 c5, c6, c7, c8 = st.columns(4)
