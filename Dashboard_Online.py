@@ -1363,10 +1363,17 @@ with tabs[3]:
                 t_ges_target = c1.number_input("Ziel Gesamtzeit (Min) ±3", 1, 300, 50)
                 n_min = c2.number_input("Min Anzahl Intervalle", 1, 50, 5)
                 n_max = c2.number_input("Max Anzahl", 1, 50, 9)
-                t_p_min = c3.number_input("Min Pause (Sek)", 0, 3600, 60, step=30)
-                t_p_max = c3.number_input("Max Pause (Sek)", 0, 3600, 60, step=30)
-                t_i_min = c4.number_input("Min Intervall (Sek)", 10, 3600, 30, step=30)
-                t_i_max = c4.number_input("Max Intervall (Sek)", 10, 3600, 1200, step=30)
+                
+                from datetime import time as dt_time
+                t_p_min_val = c3.time_input("Min Pause (mm:ss)", value=dt_time(0, 1, 0), step=30)
+                t_p_max_val = c3.time_input("Max Pause (mm:ss)", value=dt_time(0, 1, 0), step=30)
+                t_i_min_val = c4.time_input("Min Intervall (mm:ss)", value=dt_time(0, 0, 30), step=30)
+                t_i_max_val = c4.time_input("Max Intervall (mm:ss)", value=dt_time(0, 20, 0), step=30)
+                
+                t_p_min = t_p_min_val.hour * 3600 + t_p_min_val.minute * 60 + t_p_min_val.second
+                t_p_max = t_p_max_val.hour * 3600 + t_p_max_val.minute * 60 + t_p_max_val.second
+                t_i_min = t_i_min_val.hour * 3600 + t_i_min_val.minute * 60 + t_i_min_val.second
+                t_i_max = t_i_max_val.hour * 3600 + t_i_max_val.minute * 60 + t_i_max_val.second
                 
                 st.markdown("##### 2. Leistungsvorgaben (Watt)")
                 c5, c6, c7, c8 = st.columns(4)
@@ -2146,8 +2153,16 @@ with tabs[1]:
                         if not show_micro: fig_hr.update_xaxes(tick0=1, dtick=1)
                         st.plotly_chart(fig_hr, use_container_width=True)
                     with c_p3: 
-                        fig3 = px.scatter(df_compare, x="int_label", y="max_hr", color="Workout", title="Max HF", color_discrete_map=global_color_map)
-                        fig3.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
+                        fig3 = make_subplots(specs=[[{"secondary_y": True}]])
+                        for w in df_compare['Workout'].unique():
+                            sub = df_compare[df_compare['Workout'] == w]
+                            c = global_color_map.get(w, '#ffffff')
+                            fig3.add_trace(go.Scatter(x=sub['int_label'], y=sub['max_hr'], name=w, mode='lines+markers', line=dict(color=c)), secondary_y=False)
+                            if str(stats['Max HR']).isdigit() and int(stats['Max HR']) > 0:
+                                fig3.add_trace(go.Scatter(x=sub['int_label'], y=sub['max_hr'] / int(stats['Max HR']) * 100, showlegend=False, hoverinfo='skip', mode='lines', line=dict(color='rgba(0,0,0,0)')), secondary_y=True)
+                        fig3.update_layout(title="Max HF", template="plotly_dark", margin=dict(r=20))
+                        fig3.update_yaxes(title_text="bpm", secondary_y=False)
+                        if str(stats['Max HR']).isdigit() and int(stats['Max HR']) > 0: fig3.update_yaxes(title_text="% Max HF", secondary_y=True, showgrid=False)
                         if not show_micro: fig3.update_xaxes(tick0=1, dtick=1)
                         st.plotly_chart(fig3, use_container_width=True)
                     with c_p4: 
