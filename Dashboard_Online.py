@@ -2135,17 +2135,20 @@ with tabs[1]:
                         
                     df_compare['int_label'] = df_compare['interval_num'].apply(lambda x: f"B{x//100}.{x%100:02d}" if x > 100 else str(x))
                     
+                    # Workouts von Alt nach Neu sortieren
+                    sorted_workouts = sorted(df_compare['Workout'].unique())
+                    
                     c_p1, c_p2 = st.columns(2)
                     c_p3, c_p4 = st.columns(2)
                     
                     with c_p1: 
-                        fig1 = px.scatter(df_compare, x="int_label", y="avg_power", color="Workout", title="Ø Watt", color_discrete_map=global_color_map)
+                        fig1 = px.scatter(df_compare, x="int_label", y="avg_power", color="Workout", title="Ø Watt", color_discrete_map=global_color_map, category_orders={"Workout": sorted_workouts})
                         fig1.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
                         if not show_micro: fig1.update_xaxes(tick0=1, dtick=1)
                         st.plotly_chart(fig1, use_container_width=True)
                     with c_p2:
                         fig_hr = go.Figure()
-                        for w in df_compare['Workout'].unique():
+                        for w in sorted_workouts:
                             sub = df_compare[df_compare['Workout'] == w]
                             c = global_color_map.get(w, '#ffffff')
                             fig_hr.add_trace(go.Scatter(x=sub['int_label'], y=sub['avg_hr'], name=f"{w} (Ø)", 
@@ -2158,7 +2161,7 @@ with tabs[1]:
                         st.plotly_chart(fig_hr, use_container_width=True)
                     with c_p3: 
                         fig3 = make_subplots(specs=[[{"secondary_y": True}]])
-                        for w in df_compare['Workout'].unique():
+                        for w in sorted_workouts:
                             sub = df_compare[df_compare['Workout'] == w]
                             c = global_color_map.get(w, '#ffffff')
                             fig3.add_trace(go.Scatter(x=sub['int_label'], y=sub['max_hr'], name=w, mode='lines+markers', line=dict(color=c)), secondary_y=False)
@@ -2170,7 +2173,7 @@ with tabs[1]:
                         if not show_micro: fig3.update_xaxes(tick0=1, dtick=1)
                         st.plotly_chart(fig3, use_container_width=True)
                     with c_p4: 
-                        fig4 = px.scatter(df_compare, x="int_label", y="intervall_eff", color="Workout", title="Efficiency (W/bpm)", color_discrete_map=global_color_map)
+                        fig4 = px.scatter(df_compare, x="int_label", y="intervall_eff", color="Workout", title="Efficiency (W/bpm)", color_discrete_map=global_color_map, category_orders={"Workout": sorted_workouts})
                         fig4.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
                         if not show_micro: fig4.update_xaxes(tick0=1, dtick=1)
                         st.plotly_chart(fig4, use_container_width=True)
@@ -2181,11 +2184,11 @@ with tabs[1]:
                     # Dynamische Spaltenauswahl
                     optional_cols = st.multiselect(
                         "Zusätzliche Tabellenspalten anzeigen:",
-                        options=["Eff.", "Max HF", "± HF", "Dauer"],
-                        default=["Eff.", "Max HF", "± HF", "Dauer"]
+                        options=["Eff.", "Max HF %", "± HF", "Dauer"],
+                        default=["Eff.", "Max HF %", "± HF", "Dauer"]
                     )
                     
-                    unique_workouts = df_compare['Workout'].unique()
+                    unique_workouts = sorted_workouts
                     
                     num_w = len(unique_workouts)
                     # Dynamische Spaltenbreite: Abhängig von der Anzahl der sichtbaren Metriken (Spalten)
@@ -2205,13 +2208,17 @@ with tabs[1]:
                             display_df['Ø HF'] = sub_df['avg_hr']
                             
                             if "Eff." in optional_cols: display_df['Eff.'] = sub_df['intervall_eff'] if 'intervall_eff' in sub_df.columns else 0
-                            if "Max HF" in optional_cols: display_df['Max HF'] = sub_df['max_hr']
+                            if "Max HF %" in optional_cols: 
+                                if str(stats['Max HR']).isdigit() and int(stats['Max HR']) > 0:
+                                    display_df['Max HF %'] = sub_df['max_hr'] / int(stats['Max HR']) * 100
+                                else:
+                                    display_df['Max HF %'] = 0
                             if "± HF" in optional_cols: display_df['± HF'] = sub_df['std_hr'] if 'std_hr' in sub_df.columns else 0
                             if "Dauer" in optional_cols: display_df['Dauer'] = sub_df['duration_sec'].apply(lambda x: f"{int(x // 60):02d}:{int(x % 60):02d}")
                             
                             format_dict = {"Ø W": "{:.0f}", "Ø HF": "{:.0f}"}
                             if "Eff." in optional_cols: format_dict["Eff."] = "{:.2f}"
-                            if "Max HF" in optional_cols: format_dict["Max HF"] = "{:.0f}"
+                            if "Max HF %" in optional_cols: format_dict["Max HF %"] = "{:.0f} %"
                             
                             styled_df = display_df.style.format(format_dict).set_properties(**{'text-align': 'center'}).set_table_styles([{'selector': 'th', 'props': [('text-align', 'center')]}])
                             
@@ -2302,7 +2309,7 @@ with tabs[2]:
                 <thead>
                     <tr>
                         <th style="text-align: left; padding-bottom: 8px; border-bottom: 1px solid #444;">{selected_name_trend}</th>
-                        <th style="text-align: left; padding-bottom: 8px; border-bottom: 1px solid #444;">Stand: {datetime.now().strftime('%d.%m.%y')}</th>
+                        <th style="text-align: left; padding-bottom: 8px; border-bottom: 1px solid #444;">Stand: {datetime.now().strftime('%d-%m-%Y')}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -2351,4 +2358,5 @@ with tabs[2]:
                     fig_trend.add_trace(go.Scatter(x=df_trend['date_parsed'], y=df_trend['trend'], mode='lines', name='Trend (Linear)', line=dict(color='#FF3333', dash='dash')))
                     
                     fig_trend.update_layout(title=f"Entwicklung der Intervall-Efficiency ({filter_type_trend})", xaxis_title="Datum", yaxis_title="Efficiency (W/bpm)", template="plotly_dark", hovermode="x unified", margin=dict(l=0, r=0, t=40, b=0))
+                    fig_trend.update_xaxes(tickformat="%d-%m-%Y")
                     st.plotly_chart(fig_trend, use_container_width=True)
