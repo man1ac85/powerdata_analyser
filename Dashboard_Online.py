@@ -2086,12 +2086,19 @@ with tabs[1]:
                 st.session_state['eval_selected_ids'].append(wid)
 
         # Layout: 3 Spalten
-        c1, c2, c3 = st.columns([1.2, 1, 1.8])
+        c1, c2, c3 = st.columns([2, 1.5, 4.5])
         
         with c1:
-            selected_name = st.selectbox("Athlet wählen:", options=authorized_athletes["name"], key="data_eval_athlete_selector")
+            c_sel1, c_sel2 = st.columns(2)
+            opts_eval = authorized_athletes["name"].tolist()
+            def_idx_eval = opts_eval.index(st.session_state['user']) if st.session_state['user'] in opts_eval else 0
+            with c_sel1:
+                selected_name = st.selectbox("Athlet wählen:", options=opts_eval, index=def_idx_eval, key="data_eval_athlete_selector")
+           
             athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
-            filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT", "GA", "RSH", "Draußen"], key="data_eval_filter_type")
+            with c_sel2:
+                filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT", "GA", "RSH", "Draußen"], key="data_eval_filter_type")
+ 
             c_d1, c_d2 = st.columns(2)
             with c_d1: eval_start = st.date_input("Von", datetime.now() - timedelta(days=14), format="DD.MM.YYYY", key="eval_start")
             with c_d2: eval_end = st.date_input("Bis", datetime.now(), format="DD.MM.YYYY", key="eval_end")
@@ -2180,52 +2187,53 @@ with tabs[1]:
             if search_query:
                 df_workouts = df_workouts[df_workouts['filename'].str.contains(search_query, case=False, na=False) | df_workouts['date'].str.contains(search_query, case=False, na=False)]
 
-            # Feste Farbzuordnung für alle Workouts erstellen, damit Farben beim Auswählen gleich bleiben
-            all_possible_workouts = (df_all_user_workouts['date'].str.slice(0, 10) + " (" + df_all_user_workouts['type'] + ")").unique()
-            all_possible_workouts = sorted(all_possible_workouts)
+            # Feste Farbzuordnung für alle Workouts erstellen, chronologisch sortiert
+            df_all_user_workouts = df_all_user_workouts.sort_values(by='date_dt')
+            df_all_user_workouts['date_fmt'] = df_all_user_workouts['date_dt'].dt.strftime('%d.%m.%Y')
+            all_possible_workouts = (df_all_user_workouts['date_fmt'] + " (" + df_all_user_workouts['type'] + ")").unique()
+            all_possible_workouts = list(dict.fromkeys(all_possible_workouts))
             plotly_colors = px.colors.qualitative.Plotly
             extended_colors = plotly_colors * (len(all_possible_workouts) // len(plotly_colors) + 1)
             global_color_map = {w: extended_colors[i] for i, w in enumerate(all_possible_workouts)}
 
-            st.markdown("---")
-            c_list, c_sel = st.columns([1.5, 1])
-            
             delete_id = None
-            with c_list:
-                st.markdown("##### 🗂️ Suchergebnis (Workouts)")
-                if df_workouts.empty:
-                    st.info("Keine Workouts passend zu Filter & Zeitraum gefunden.")
-                else:
-                    for idx, row in df_workouts.iterrows():
-                        col_check, col_del = st.columns([0.85, 0.15])
-                        date_str = row['date_dt'].strftime('%d.%m.%Y')
-                        is_sel = row['id'] in st.session_state['eval_selected_ids']
-                        with col_check:
-                            st.checkbox(
-                                f"{date_str} | {row['type']} ({row['structure']}) | {row['filename']}", 
-                                value=is_sel, 
-                                key=f"eval_check_{row['id']}",
-                                on_change=toggle_eval_workout,
-                                args=(row['id'],)
-                            )
-                        with col_del:
-                            if st.button("🗑️", key=f"eval_del_{row['id']}"):
-                                delete_id = row['id']
+            with c3:
+                c_list, c_sel = st.columns([1.5, 1])
+                with c_list:
+                    st.markdown("##### 🗂️ Suchergebnis (Workouts)")
+                    if df_workouts.empty:
+                        st.info("Keine Workouts passend zu Filter & Zeitraum gefunden.")
+                    else:
+                        for idx, row in df_workouts.iterrows():
+                            col_check, col_del = st.columns([0.85, 0.15])
+                            date_str = row['date_dt'].strftime('%d.%m.%Y')
+                            is_sel = row['id'] in st.session_state['eval_selected_ids']
+                            with col_check:
+                                st.checkbox(
+                                    f"{date_str} | {row['type']} ({row['structure']}) | {row['filename']}", 
+                                    value=is_sel, 
+                                    key=f"eval_check_{row['id']}",
+                                    on_change=toggle_eval_workout,
+                                    args=(row['id'],)
+                                )
+                            with col_del:
+                                if st.button("🗑️", key=f"eval_del_{row['id']}"):
+                                    delete_id = row['id']
 
-            with c_sel:
-                st.markdown("##### 📌 Ausgewählt zum Vergleich")
-                if not st.session_state['eval_selected_ids']:
-                    st.info("Noch keine Workouts markiert.")
-                else:
-                    sel_rows = df_all_user_workouts[df_all_user_workouts['id'].isin(st.session_state['eval_selected_ids'])]
-                    sel_rows = sel_rows.sort_values(by='date_dt', ascending=False)
-                    for _, srow in sel_rows.iterrows():
-                        s_date_str = srow['date_dt'].strftime('%d.%m.%Y')
-                        st.markdown(f"- **{s_date_str}**: {srow['type']} ({srow['structure']})")
-                    
-                    if st.button("🗑️ Auswahl aufheben", use_container_width=True):
-                        st.session_state['eval_selected_ids'] = []
-                        st.rerun()
+                with c_sel:
+                    st.markdown("##### 📌 Ausgewählt zum Vergleich")
+                    if not st.session_state['eval_selected_ids']:
+                        st.info("Noch keine Workouts markiert.")
+                    else:
+                        sel_rows = df_all_user_workouts[df_all_user_workouts['id'].isin(st.session_state['eval_selected_ids'])]
+                        sel_rows = sel_rows.sort_values(by='date_dt', ascending=False)
+                        for _, srow in sel_rows.iterrows():
+                            s_date_str = srow['date_dt'].strftime('%d.%m.%Y')
+                            st.markdown(f"- **{s_date_str}**: {srow['type']} ({srow['structure']})")
+                        
+                        if st.button("🗑️ Auswahl aufheben", use_container_width=True):
+                            st.session_state['eval_selected_ids'] = []
+                            st.rerun()
                         
             if delete_id is not None:
                 if delete_id in st.session_state['eval_selected_ids']:
@@ -2245,18 +2253,22 @@ with tabs[1]:
                 if not df_compare.empty:
                     has_micro = (df_compare['interval_num'] > 100).any()
                     
-                    col_sw1, col_sw2 = st.columns([3, 1])
-                    with col_sw2:
-                        show_micro = st.checkbox("Einzelansicht (Micro-Intervalle)", value=False) if has_micro else False
+                    if has_micro:
+                        show_micro = st.checkbox("Einzelansicht (Micro-Intervalle)", value=False)
+                    else:
+                        show_micro = False
                         
-                    df_compare['Workout'] = df_compare['date'].str.slice(0, 10) + " (" + df_compare['type'] + ")"
+                    df_compare['date_dt'] = pd.to_datetime(df_compare['date'], errors='coerce')
+                    df_compare['date_fmt'] = df_compare['date_dt'].dt.strftime('%d.%m.%Y')
+                    df_compare['Workout'] = df_compare['date_fmt'] + " (" + df_compare['type'] + ")"
                     
                     if has_micro and not show_micro:
                         micro_df = df_compare[df_compare['interval_num'] > 100].copy()
                         normal_df = df_compare[df_compare['interval_num'] <= 100].copy()
                         
                         micro_df['macro_num'] = micro_df['interval_num'] // 100
-                        agg_dict = {'avg_power': 'mean', 'avg_hr': 'mean', 'max_hr': 'max', 'duration_sec': 'sum', 'date': 'first', 'type': 'first'}
+                        # 'date_dt' muss zwingend behalten werden, um danach chronologisch sortieren zu können
+                        agg_dict = {'avg_power': 'mean', 'avg_hr': 'mean', 'max_hr': 'max', 'duration_sec': 'sum', 'date': 'first', 'type': 'first', 'date_dt': 'first'}
                         for col in ['std_hr', 'avg_hr_p', 'intervall_eff', 'NP_int']:
                             if col in micro_df.columns: agg_dict[col] = 'mean'
                             
@@ -2264,54 +2276,17 @@ with tabs[1]:
                         grouped.rename(columns={'macro_num': 'interval_num'}, inplace=True)
                         
                         df_compare = pd.concat([normal_df, grouped], ignore_index=True)
-                        df_compare = df_compare.sort_values(['Workout', 'interval_num'])
+                        
+                    # DataFrame verlässlich chronologisch (Alt -> Neu) sortieren
+                    df_compare = df_compare.sort_values(['date_dt', 'interval_num'])
                         
                     df_compare['int_label'] = df_compare['interval_num'].apply(lambda x: f"B{x//100}.{x%100:02d}" if x > 100 else str(x))
                     
-                    # Workouts von Alt nach Neu sortieren
-                    sorted_workouts = sorted(df_compare['Workout'].unique())
+                    # Workouts in echter chronologischer Reihenfolge als Liste extrahieren
+                    workout_dates = df_compare[['Workout', 'date_dt']].drop_duplicates(subset=['Workout'])
+                    workout_dates = workout_dates.sort_values(by='date_dt', ascending=True)
+                    sorted_workouts = workout_dates['Workout'].tolist()
                     
-                    c_p1, c_p2 = st.columns(2)
-                    c_p3, c_p4 = st.columns(2)
-                    
-                    with c_p1: 
-                        fig1 = px.scatter(df_compare, x="int_label", y="avg_power", color="Workout", title="Ø Watt", color_discrete_map=global_color_map, category_orders={"Workout": sorted_workouts})
-                        fig1.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
-                        if not show_micro: fig1.update_xaxes(tick0=1, dtick=1)
-                        st.plotly_chart(fig1, use_container_width=True)
-                    with c_p2:
-                        fig_hr = go.Figure()
-                        for w in sorted_workouts:
-                            sub = df_compare[df_compare['Workout'] == w]
-                            c = global_color_map.get(w, '#ffffff')
-                            fig_hr.add_trace(go.Scatter(x=sub['int_label'], y=sub['avg_hr'], name=f"{w} (Ø)", 
-                                                        error_y=dict(type='data', array=sub['std_hr'], visible=True),
-                                                        mode='lines+markers', line=dict(color=c), marker=dict(color=c)))
-                            fig_hr.add_trace(go.Scatter(x=sub['int_label'], y=sub['avg_hr_p'], name=f"{w} (20-80%)", 
-                                                        mode='markers', marker=dict(size=8, color=c, symbol='diamond', line=dict(color='white', width=1))))
-                        fig_hr.update_layout(title="Ø Herzfrequenz (+- StdDev)", template="plotly_dark")
-                        if not show_micro: fig_hr.update_xaxes(tick0=1, dtick=1)
-                        st.plotly_chart(fig_hr, use_container_width=True)
-                    with c_p3: 
-                        fig3 = make_subplots(specs=[[{"secondary_y": True}]])
-                        for w in sorted_workouts:
-                            sub = df_compare[df_compare['Workout'] == w]
-                            c = global_color_map.get(w, '#ffffff')
-                            fig3.add_trace(go.Scatter(x=sub['int_label'], y=sub['max_hr'], name=w, mode='lines+markers', line=dict(color=c)), secondary_y=False)
-                            if str(stats['Max HR']).isdigit() and int(stats['Max HR']) > 0:
-                                fig3.add_trace(go.Scatter(x=sub['int_label'], y=sub['max_hr'] / int(stats['Max HR']) * 100, showlegend=False, hoverinfo='skip', mode='lines', line=dict(color='rgba(0,0,0,0)')), secondary_y=True)
-                        fig3.update_layout(title="Max HF", template="plotly_dark", margin=dict(r=20))
-                        fig3.update_yaxes(title_text="bpm", secondary_y=False)
-                        if str(stats['Max HR']).isdigit() and int(stats['Max HR']) > 0: fig3.update_yaxes(title_text="% Max HF", secondary_y=True, showgrid=False)
-                        if not show_micro: fig3.update_xaxes(tick0=1, dtick=1)
-                        st.plotly_chart(fig3, use_container_width=True)
-                    with c_p4: 
-                        fig4 = px.scatter(df_compare, x="int_label", y="intervall_eff", color="Workout", title="Efficiency (W/bpm)", color_discrete_map=global_color_map, category_orders={"Workout": sorted_workouts})
-                        fig4.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
-                        if not show_micro: fig4.update_xaxes(tick0=1, dtick=1)
-                        st.plotly_chart(fig4, use_container_width=True)
-
-                    st.markdown("---")
                     st.markdown("#### Intervall-Werte")
                     
                     # Dynamische Spaltenauswahl
@@ -2397,6 +2372,29 @@ with tabs[1]:
                             styled_df = display_df.style.format(format_dict).set_properties(**{'text-align': 'center'}).set_table_styles([{'selector': 'th', 'props': [('text-align', 'center')]}])
                             
                             st.dataframe(styled_df, hide_index=True, use_container_width=True)
+
+                    st.markdown("---")
+                    show_graphs = st.checkbox("Graphansicht für diese Workouts aktivieren", value=False)
+                    if show_graphs:
+                        c_p3, c_p4 = st.columns(2)
+                        with c_p3: 
+                            fig3 = make_subplots(specs=[[{"secondary_y": True}]])
+                            for w in sorted_workouts:
+                                sub = df_compare[df_compare['Workout'] == w]
+                                c = global_color_map.get(w, '#ffffff')
+                                fig3.add_trace(go.Scatter(x=sub['int_label'], y=sub['max_hr'], name=w, mode='lines+markers', line=dict(color=c)), secondary_y=False)
+                                if str(stats['Max HR']).isdigit() and int(stats['Max HR']) > 0:
+                                    fig3.add_trace(go.Scatter(x=sub['int_label'], y=sub['max_hr'] / int(stats['Max HR']) * 100, showlegend=False, hoverinfo='skip', mode='lines', line=dict(color='rgba(0,0,0,0)')), secondary_y=True)
+                            fig3.update_layout(title="Max HF", template="plotly_dark", margin=dict(r=20))
+                            fig3.update_yaxes(title_text="bpm", secondary_y=False)
+                            if str(stats['Max HR']).isdigit() and int(stats['Max HR']) > 0: fig3.update_yaxes(title_text="% Max HF", secondary_y=True, showgrid=False)
+                            if not show_micro: fig3.update_xaxes(tick0=1, dtick=1)
+                            st.plotly_chart(fig3, use_container_width=True)
+                        with c_p4: 
+                            fig4 = px.scatter(df_compare, x="int_label", y="intervall_eff", color="Workout", title="Efficiency (W/bpm)", color_discrete_map=global_color_map, category_orders={"Workout": sorted_workouts})
+                            fig4.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
+                            if not show_micro: fig4.update_xaxes(tick0=1, dtick=1)
+                            st.plotly_chart(fig4, use_container_width=True)
 
                     st.markdown("---")
                     st.markdown("#### 🗺️ GPS Routen (Live aus der Cloud)")
