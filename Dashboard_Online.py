@@ -565,6 +565,32 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
             intervals_calculated = []
             if num_intervals > 0:
                 unique_blocks = df[df['is_interval']]['block_id'].unique()
+                
+            stats = {}
+            if active_user_id:
+                try:
+                    conn = get_db_connection()
+                    user_data = conn.query("SELECT api_key, intervals_id FROM users WHERE id = :uid", params={"uid": active_user_id}, ttl=3600)
+                    if not user_data.empty:
+                        tmp_api = user_data.iloc[0]['api_key']
+                        tmp_int = user_data.iloc[0].get('intervals_id', '0')
+                        stats = get_athlete_stats_from_intervals(tmp_api, tmp_int)
+                except Exception:
+                    pass
+
+                has_max_hr = str(stats.get('Max HR', '')).isdigit() and int(stats['Max HR']) > 0
+                max_hr_val = int(stats['Max HR']) if has_max_hr else None
+                hr_threshold = max_hr_val * 0.88 if max_hr_val else None
+                
+                macro_block_b_ids = {}
+                if locals().get('is_micro', False):
+                    for b_id in unique_blocks:
+                        int_num = interval_nums.get(b_id, b_id)
+                        if int_num > 100:
+                            m_idx = int_num // 100
+                            if m_idx not in macro_block_b_ids: macro_block_b_ids[m_idx] = []
+                            macro_block_b_ids[m_idx].append(b_id)
+
                 for idx_blk, b_id in enumerate(unique_blocks, start=1):
                     block_df = df[df['block_id'] == b_id]
                     if block_df.empty: continue
@@ -591,8 +617,14 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                     else: 
                         avg_hr_p = 0
                         
+                    time_above_88 = 0
+                    if hr_threshold and not hr_data.empty:
+                        time_above_88 = len(hr_data[hr_data >= hr_threshold])
+                        
+                    int_num_display = int(interval_nums.get(idx_blk, idx_blk)) if not is_ride_analysis and mode_type == "Automatisch (Algorithmus)" else int(idx_blk)
+                        
                     intervals_calculated.append({
-                        "Intervall": int(interval_nums.get(idx_blk, idx_blk)) if not is_ride_analysis and mode_type == "Automatisch (Algorithmus)" else int(idx_blk), 
+                        "Intervall": int_num_display, 
                         "Ø Watt": avg_p, 
                         "Ø HF": avg_hr, 
                         "Efficiency": float(round(efficiency, 2)),
@@ -601,26 +633,77 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                         "Δ HF+-": std_hr, 
                         "Ø HF_P (20-80)": avg_hr_p, 
                         "Dauer (mm:ss)": f"{int(len(block_df) // 60):02d}:{int(len(block_df) % 60):02d}",
-                        "Dauer_sec": len(block_df) 
+                        "Dauer_sec": len(block_df),
+                        ">= 88% HF (s)": time_above_88
                     })
+                    
+                    if locals().get('is_micro', False) and int_num_display > 100:
+                        m_idx = int_num_display // 100
+                        if b_id == macro_block_b_ids[m_idx][-1]:
+                            first_b_id = macro_block_b_ids[m_idx][0]
+                            last_b_id = macro_block_b_ids[m_idx][-1]
+                            
+                            start_time = df[df['block_id'] == first_b_id].index.min()
+                            end_time = df[df['block_id'] == last_b_id].index.max()
+                            
+                            macro_df = df[(df.index >= start_time) & (df.index <= end_time)]
+                            
+                            mac_avg_p = int(macro_df['power'].mean()) if not macro_df['power'].empty else 0
+                            mac_np_val = (macro_df['power_roll_30'] ** 4).mean() ** 0.25 if 'power_roll_30' in macro_df.columns and not macro_df.empty else 0
+                            if pd.isna(mac_np_val): mac_np_val = 0
+                            
+                            mac_hr_data = macro_df['heart_rate'].dropna() if 'heart_rate' in macro_df.columns else pd.Series(dtype=float)
+                            mac_avg_hr = int(mac_hr_data.mean()) if not mac_hr_data.empty else 0
+                            mac_max_hr = int(mac_hr_data.max()) if not mac_hr_data.empty else 0
+                            mac_std_hr = float(round(mac_hr_data.std(), 1)) if not mac_hr_data.empty else 0
+                            
+                            mac_efficiency = mac_np_val / mac_avg_hr if mac_avg_hr > 0 else 0
+                            
+                            mac_avg_hr_p = 0
+                            if not mac_hr_data.empty:
+                                mac_lower_p = mac_hr_data.quantile(0.20)
+                                mac_upper_p = mac_hr_data.quantile(0.80)
+                                mac_avg_hr_p = int(mac_hr_data[(mac_hr_data >= mac_lower_p) & (mac_hr_data <= mac_upper_p)].mean())
+                            
+                            mac_time_above_88 = 0
+                            if hr_threshold and not mac_hr_data.empty:
+                                mac_time_above_88 = len(mac_hr_data[mac_hr_data >= hr_threshold])
+                                
+                            intervals_calculated.append({
+                                "Intervall": m_idx * 100,
+                                "Ø Watt": mac_avg_p,
+                                "Ø HF": mac_avg_hr,
+                                "Efficiency": float(round(mac_efficiency, 2)),
+                                "NP": float(round(mac_np_val, 1)),
+                                "Max HF": mac_max_hr,
+                                "Δ HF+-": mac_std_hr,
+                                "Ø HF_P (20-80)": mac_avg_hr_p,
+                                "Dauer (mm:ss)": f"{int(len(macro_df) // 60):02d}:{int(len(macro_df) % 60):02d}",
+                                "Dauer_sec": len(macro_df),
+                                ">= 88% HF (s)": mac_time_above_88
+                            })
             
-            n_ints = len(intervals_calculated)
-            int_avg_power = int(round(sum(i["Ø Watt"] for i in intervals_calculated) / n_ints)) if n_ints > 0 else None
-            int_avg_hr = int(round(sum(i["Ø HF"] for i in intervals_calculated) / n_ints)) if n_ints > 0 else None
-            int_avg_eff = float(round(sum(i["Efficiency"] for i in intervals_calculated) / n_ints, 2)) if n_ints > 0 else None
+            real_ints = [i for i in intervals_calculated if not (i["Intervall"] >= 100 and i["Intervall"] % 100 == 0)]
+            if not real_ints: real_ints = intervals_calculated
+            
+            n_ints = len(real_ints)
+            int_avg_power = int(round(sum(i["Ø Watt"] for i in real_ints) / n_ints)) if n_ints > 0 else None
+            int_avg_hr = int(round(sum(i["Ø HF"] for i in real_ints) / n_ints)) if n_ints > 0 else None
+            int_avg_eff = float(round(sum(i["Efficiency"] for i in real_ints) / n_ints, 2)) if n_ints > 0 else None
             
             workout_date = df.index.min().strftime('%Y-%m-%d')
             
             if not is_ride_analysis and detected_type != "HIT 40/20" and n_ints > 0:
-                durations_min = [max(1, int(round(i["Dauer_sec"] / 60.0))) for i in intervals_calculated]
+                durations_min = [max(1, int(round(i["Dauer_sec"] / 60.0))) for i in real_ints]
                 if len(set(durations_min)) > 1:
                     workout_structure = f"{n_ints}x{'-'.join(map(str, durations_min))}"
                 else:
                     workout_structure = f"{n_ints}x{durations_min[0]}"
             
-            final_filename = filename
-            if not match_structure:
+            if not is_ride_analysis:
                 final_filename = f"{detected_type} {workout_structure}"
+            else:
+                final_filename = f"{detected_type} Ride"
                 ignore_names = ["fahrt", "ride", "morning ride", "afternoon ride", "lunch ride", "evening ride", "radfahren", "rennradfahren", "unbenannte fahrt", "unbekannt"]
                 if filename and not any(ign in filename.lower() for ign in ignore_names):
                     final_filename += f" - {filename}"
@@ -637,7 +720,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                 "int_avg_power": int_avg_power,
                 "int_avg_hr": int_avg_hr,
                 "int_avg_eff": int_avg_eff,
-                "int_count": expected_intervals if not is_ride_analysis and n_ints > 0 else None,
+                "int_count": n_ints if not is_ride_analysis and n_ints > 0 else None,
                 "int_length": int(round(sum(durations_min)/len(durations_min))) if not is_ride_analysis and n_ints > 0 and 'durations_min' in locals() else (expected_duration_min if not is_ride_analysis and n_ints > 0 else None)
             }
 
@@ -802,24 +885,30 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                     df_res = pd.DataFrame(intervals_calculated)
                     display_df = df_res.drop(columns=['Dauer_sec'])
                     
-                    # Intervall-Nummern formatieren für 40/20 (Micro-Intervalle 101 -> Block 1 - 01)
                     display_df['Intervall'] = display_df['Intervall'].apply(
-                        lambda x: f"Block {x//100} - {x%100:02d}" if (isinstance(x, (int, float)) and x > 100) else str(x)
+                        lambda x: f"Block {x//100} Average" if (isinstance(x, (int, float)) and x >= 100 and x % 100 == 0) else (f"Block {x//100} - {x%100:02d}" if (isinstance(x, (int, float)) and x > 100) else str(x))
                     )
                     
                     display_df = display_df.rename(columns={"Intervall": "Kennwerte pro Intervall"})
                     
-                    avg_dur_sec_total = sum(i["Dauer_sec"] for i in intervals_calculated) / len(intervals_calculated)
+                    if '>= 88% HF (s)' in display_df.columns:
+                        display_df['>= 88% HF'] = display_df['>= 88% HF (s)'].apply(lambda x: f"{int(x // 60):02d}:{int(x % 60):02d}")
+                        display_df = display_df.drop(columns=['>= 88% HF (s)'])
+                    
+                    avg_dur_sec_total = sum(i["Dauer_sec"] for i in real_ints) / len(real_ints)
+                    avg_88_total = sum(i.get(">= 88% HF (s)", 0) for i in real_ints) / len(real_ints)
+                    
                     avg_row = {
                         "Kennwerte pro Intervall": "Averages",
                         "Ø Watt": metadata["int_avg_power"],
                         "Ø HF": metadata["int_avg_hr"],
                         "Efficiency": metadata["int_avg_eff"],
-                        "NP": float(round(sum(i["NP"] for i in intervals_calculated) / len(intervals_calculated), 1)),
-                        "Max HF": int(round(sum(i["Max HF"] for i in intervals_calculated) / len(intervals_calculated))),
-                        "Δ HF+-": float(round(sum(i["Δ HF+-"] for i in intervals_calculated) / len(intervals_calculated), 1)),
-                        "Ø HF_P (20-80)": int(round(sum(i["Ø HF_P (20-80)"] for i in intervals_calculated) / len(intervals_calculated))),
-                        "Dauer (mm:ss)": f"{int(avg_dur_sec_total // 60):02d}:{int(avg_dur_sec_total % 60):02d}"
+                        "NP": float(round(sum(i["NP"] for i in real_ints) / len(real_ints), 1)),
+                        "Max HF": int(round(sum(i["Max HF"] for i in real_ints) / len(real_ints))),
+                        "Δ HF+-": float(round(sum(i["Δ HF+-"] for i in real_ints) / len(real_ints), 1)),
+                        "Ø HF_P (20-80)": int(round(sum(i["Ø HF_P (20-80)"] for i in real_ints) / len(real_ints))),
+                        "Dauer (mm:ss)": f"{int(avg_dur_sec_total // 60):02d}:{int(avg_dur_sec_total % 60):02d}",
+                        ">= 88% HF": f"{int(avg_88_total // 60):02d}:{int(avg_88_total % 60):02d}"
                     }
                     display_df = pd.concat([display_df, pd.DataFrame([avg_row])], ignore_index=True)
                     
@@ -840,7 +929,8 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                             "Max HF": st.column_config.Column("Max HF", width=40),
                             "Δ HF+-": st.column_config.Column("Δ HF+-", width=40),
                             "Ø HF_P (20-80)": st.column_config.Column("Ø HF_P (20-80)", width=60),
-                            "Dauer (mm:ss)": st.column_config.Column("Dauer (mm:ss)", width=60)
+                            "Dauer (mm:ss)": st.column_config.Column("Dauer (mm:ss)", width=60),
+                            ">= 88% HF": st.column_config.Column(">= 88% HF", width=60)
                         }
                     )
                 
@@ -1153,8 +1243,8 @@ def save_workout_to_db(metadata, interval_list, overwrite_id=None):
         for row in interval_list:
             # Konvertiere jeden Wert sicher in einen Python-Typ (float oder int)
             s.execute(text("""
-                INSERT INTO intervals (workout_id, interval_num, avg_power, avg_hr, max_hr, duration_sec, std_hr, avg_hr_p, "NP_int", intervall_eff) 
-                VALUES (:wid, :num, :ap, :ahr, :mhr, :dur, :std, :ahrp, :np, :eff)
+                                INSERT INTO intervals (workout_id, interval_num, avg_power, avg_hr, max_hr, duration_sec, std_hr, avg_hr_p, "NP_int", intervall_eff, time_above_88_hr) 
+                                VALUES (:wid, :num, :ap, :ahr, :mhr, :dur, :std, :ahrp, :np, :eff, :t88)
             """), {
                 "wid": int(workout_id),
                 "num": int(row['Intervall']),
@@ -1165,7 +1255,8 @@ def save_workout_to_db(metadata, interval_list, overwrite_id=None):
                 "std": float(row['Δ HF+-']),
                 "ahrp": float(row['Ø HF_P (20-80)']),
                 "np": float(row['NP']),
-                "eff": float(row['Efficiency'])
+                                "eff": float(row['Efficiency']),
+                                "t88": int(row.get('>= 88% HF (s)', 0))
             })
         s.commit()
     st.cache_data.clear()
@@ -2097,7 +2188,7 @@ with tabs[1]:
            
             athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
             with c_sel2:
-                filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT", "GA", "RSH", "Draußen"], key="data_eval_filter_type")
+                filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT", "HIT 40/20", "GA", "RSH", "Draußen"], key="data_eval_filter_type")
  
             c_d1, c_d2 = st.columns(2)
             with c_d1: eval_start = st.date_input("Von", datetime.now() - timedelta(days=14), format="DD.MM.YYYY", key="eval_start")
@@ -2263,24 +2354,31 @@ with tabs[1]:
                     df_compare['Workout'] = df_compare['date_fmt'] + " (" + df_compare['type'] + ")"
                     
                     if has_micro and not show_micro:
-                        micro_df = df_compare[df_compare['interval_num'] > 100].copy()
                         normal_df = df_compare[df_compare['interval_num'] <= 100].copy()
+                        macro_averages = df_compare[(df_compare['interval_num'] > 100) & (df_compare['interval_num'] % 100 == 0)].copy()
                         
+                        micro_df = df_compare[(df_compare['interval_num'] > 100) & (df_compare['interval_num'] % 100 != 0)].copy()
                         micro_df['macro_num'] = micro_df['interval_num'] // 100
-                        # 'date_dt' muss zwingend behalten werden, um danach chronologisch sortieren zu können
-                        agg_dict = {'avg_power': 'mean', 'avg_hr': 'mean', 'max_hr': 'max', 'duration_sec': 'sum', 'date': 'first', 'type': 'first', 'date_dt': 'first'}
-                        for col in ['std_hr', 'avg_hr_p', 'intervall_eff', 'NP_int']:
-                            if col in micro_df.columns: agg_dict[col] = 'mean'
-                            
-                        grouped = micro_df.groupby(['Workout', 'macro_num'], as_index=False).agg(agg_dict)
-                        grouped.rename(columns={'macro_num': 'interval_num'}, inplace=True)
                         
-                        df_compare = pd.concat([normal_df, grouped], ignore_index=True)
+                        existing_macros = set(zip(macro_averages['Workout'], macro_averages['interval_num']))
+                        fallback_micros = micro_df[~micro_df.apply(lambda row: (row['Workout'], row['macro_num']) in existing_macros, axis=1)]
+                        
+                        if not fallback_micros.empty:
+                            agg_dict = {'avg_power': 'mean', 'avg_hr': 'mean', 'max_hr': 'max', 'duration_sec': 'sum', 'date': 'first', 'type': 'first', 'date_dt': 'first'}
+                            for col in ['std_hr', 'avg_hr_p', 'intervall_eff', 'NP_int', 'time_above_88_hr']:
+                                if col in fallback_micros.columns: agg_dict[col] = 'mean'
+                                
+                            grouped = fallback_micros.groupby(['Workout', 'macro_num'], as_index=False).agg(agg_dict)
+                            grouped.rename(columns={'macro_num': 'interval_num'}, inplace=True)
+                            
+                            df_compare = pd.concat([normal_df, macro_averages, grouped], ignore_index=True)
+                        else:
+                            df_compare = pd.concat([normal_df, macro_averages], ignore_index=True)
                         
                     # DataFrame verlässlich chronologisch (Alt -> Neu) sortieren
                     df_compare = df_compare.sort_values(['date_dt', 'interval_num'])
                         
-                    df_compare['int_label'] = df_compare['interval_num'].apply(lambda x: f"B{x//100}.{x%100:02d}" if x > 100 else str(x))
+                    df_compare['int_label'] = df_compare['interval_num'].apply(lambda x: f"Block {x//100} Average" if x >= 100 and x % 100 == 0 else (f"B{x//100}.{x%100:02d}" if x > 100 else str(x)))
                     
                     # Workouts in echter chronologischer Reihenfolge als Liste extrahieren
                     workout_dates = df_compare[['Workout', 'date_dt']].drop_duplicates(subset=['Workout'])
@@ -2292,8 +2390,8 @@ with tabs[1]:
                     # Dynamische Spaltenauswahl
                     optional_cols = st.multiselect(
                         "Zusätzliche Tabellenspalten anzeigen:",
-                        options=["Eff.", "Max HF %", "± HF", "Dauer"],
-                        default=["Eff.", "Max HF %", "± HF", "Dauer"]
+                        options=["Eff.", "Max HF %", "± HF", "Dauer", ">= 88% HF"],
+                        default=["Eff.", "Max HF %", "± HF", "Dauer", ">= 88% HF"]
                     )
                     
                     unique_workouts = sorted_workouts
@@ -2330,6 +2428,8 @@ with tabs[1]:
                                     display_df['Max HF'] = sub_df['max_hr']
                             if "± HF" in optional_cols: display_df['± HF'] = sub_df['std_hr'] if 'std_hr' in sub_df.columns else 0
                             if "Dauer" in optional_cols: display_df['Dauer'] = sub_df['duration_sec'].apply(lambda x: f"{int(x // 60):02d}:{int(x % 60):02d}")
+                            if ">= 88% HF" in optional_cols:
+                                display_df['>= 88% HF'] = sub_df['time_above_88_hr'].apply(lambda x: f"{int((x if pd.notnull(x) else 0) // 60):02d}:{int((x if pd.notnull(x) else 0) % 60):02d}") if 'time_above_88_hr' in sub_df.columns else "00:00"
                             
                             # Average Row hinzufügen
                             avg_row = {"Int.": "Ø Gesamt"}
@@ -2352,6 +2452,10 @@ with tabs[1]:
                             if "Dauer" in optional_cols:
                                 mean_dur = sub_df['duration_sec'].mean()
                                 avg_row["Dauer"] = f"{int(mean_dur // 60):02d}:{int(mean_dur % 60):02d}"
+                            if ">= 88% HF" in optional_cols:
+                                mean_88 = sub_df['time_above_88_hr'].mean() if 'time_above_88_hr' in sub_df.columns else 0
+                                if pd.isna(mean_88): mean_88 = 0
+                                avg_row[">= 88% HF"] = f"{int(mean_88 // 60):02d}:{int(mean_88 % 60):02d}"
                                 
                             display_df = pd.concat([display_df, pd.DataFrame([avg_row])], ignore_index=True)
 
@@ -2491,11 +2595,60 @@ with tabs[2]:
             st.markdown(profile_html_trend, unsafe_allow_html=True)
             
         uid_val_trend = int(athlete_row_trend['id'])
-        df_workouts_trend = fetch_workouts_from_db(uid_val_trend)
+        df_workouts_trend_raw = fetch_workouts_from_db(uid_val_trend)
         
-        if df_workouts_trend.empty:
+        if df_workouts_trend_raw.empty:
             st.info(f"Keine Trainingsdaten für {selected_name_trend} gefunden.")
         else:
+            conn = get_db_connection()
+            try:
+                df_all_ints = conn.query("SELECT workout_id, duration_sec, interval_num FROM intervals WHERE workout_id IN (SELECT id FROM workouts WHERE user_id = :uid)", params={"uid": uid_val_trend}, ttl=60)
+            except Exception:
+                df_all_ints = pd.DataFrame()
+                
+            def build_real_struct_from_ints(w_id, w_type, fallback_struct):
+                if w_type == 'HIT 40/20': 
+                    m = re.search(r'(\d+x\d+x40/20)', str(fallback_struct))
+                    return m.group(1) if m else '40/20'
+                    
+                if df_all_ints.empty: 
+                    m = re.search(r'(\d+x\d+(?:-\d+)*)', str(fallback_struct))
+                    return m.group(1) if m else "Manuell"
+                    
+                w_ints = df_all_ints[df_all_ints['workout_id'] == int(w_id)].sort_values('interval_num')
+                if w_ints.empty: 
+                    m = re.search(r'(\d+x\d+(?:-\d+)*)', str(fallback_struct))
+                    return m.group(1) if m else "Manuell"
+                
+                real_ints = w_ints[~((w_ints['interval_num'] >= 100) & (w_ints['interval_num'] % 100 == 0))]
+                if real_ints.empty: 
+                    return "Manuell"
+                
+                n = len(real_ints)
+                durs = [max(1, int(round(float(d) / 60.0))) for d in real_ints['duration_sec'] if pd.notna(d)]
+                if len(set(durs)) > 1:
+                    return f"{n}x{'-'.join(map(str, durs))}"
+                else:
+                    return f"{n}x{durs[0]}" if durs else "Manuell"
+
+            def get_real_int_time(w_id, w_type, fallback_count, fallback_len):
+                if w_type == 'HIT 40/20' or df_all_ints.empty:
+                    return float(fallback_count or 0) * float(fallback_len or 0)
+                w_ints = df_all_ints[df_all_ints['workout_id'] == int(w_id)]
+                if w_ints.empty:
+                    return float(fallback_count or 0) * float(fallback_len or 0)
+                real_ints = w_ints[~((w_ints['interval_num'] >= 100) & (w_ints['interval_num'] % 100 == 0))]
+                return float(pd.to_numeric(real_ints['duration_sec'], errors='coerce').sum() / 60.0)
+
+            df_workouts_trend_raw['real_structure'] = df_workouts_trend_raw.apply(
+                lambda r: build_real_struct_from_ints(r['id'], r['type'], r.get('structure', '')), axis=1
+            )
+            df_workouts_trend_raw['real_time'] = df_workouts_trend_raw.apply(
+                lambda r: get_real_int_time(r['id'], r['type'], r.get('int_count', 0), r.get('int_length', 0)), axis=1
+            )
+            df_workouts_trend_raw['clean_name'] = df_workouts_trend_raw['type'] + " " + df_workouts_trend_raw['real_structure']
+            
+            df_workouts_trend = df_workouts_trend_raw.copy()
             if filter_type_trend != "ALLE":
                 df_workouts_trend = df_workouts_trend[df_workouts_trend['type'] == filter_type_trend]
             
@@ -2523,9 +2676,73 @@ with tabs[2]:
                         df_trend['trend'] = y
                         
                     fig_trend = go.Figure()
-                    fig_trend.add_trace(go.Scatter(x=df_trend['date_parsed'], y=df_trend['int_avg_eff'], mode='markers', name='Avg Efficiency', marker=dict(size=10, color='#3399FF'), text=df_trend['filename'], hovertemplate="<b>%{text}</b><br>Datum: %{x}<br>Efficiency: %{y:.2f}<extra></extra>"))
+                    fig_trend.add_trace(go.Scatter(x=df_trend['date_parsed'], y=df_trend['int_avg_eff'], mode='markers', name='Avg Efficiency', marker=dict(size=10, color='#3399FF'), text=df_trend['clean_name'], hovertemplate="<b>%{text}</b><br>Datum: %{x}<br>Efficiency: %{y:.2f}<extra></extra>"))
                     fig_trend.add_trace(go.Scatter(x=df_trend['date_parsed'], y=df_trend['trend'], mode='lines', name='Trend (Linear)', line=dict(color='#FF3333', dash='dash')))
                     
                     fig_trend.update_layout(title=f"Entwicklung der Intervall-Efficiency ({filter_type_trend})", xaxis_title="Datum", yaxis_title="Efficiency (W/bpm)", template="plotly_dark", hovermode="x unified", margin=dict(l=0, r=0, t=40, b=0))
                     fig_trend.update_xaxes(tickformat="%d-%m-%Y")
                     st.plotly_chart(fig_trend, use_container_width=True)
+                    
+            st.markdown("---")
+            st.markdown("#### 📊 Workout Verteilung & Zeiten")
+            
+            col_d1, col_d2, _ = st.columns([1, 1, 2])
+            with col_d1:
+                trend_start = st.date_input("Von (Verteilung)", datetime.now() - timedelta(days=90), format="DD.MM.YYYY", key="trend_dist_start")
+            with col_d2:
+                trend_end = st.date_input("Bis (Verteilung)", datetime.now(), format="DD.MM.YYYY", key="trend_dist_end")
+            
+            df_dist = df_workouts_trend_raw.copy()
+            df_dist['date_parsed'] = pd.to_datetime(df_dist['date'], errors='coerce')
+            mask_date = (df_dist['date_parsed'].dt.date >= trend_start) & (df_dist['date_parsed'].dt.date <= trend_end)
+            df_dist = df_dist[mask_date]
+            
+            target_types = ["LIT", "MIT", "HIT", "HIT 40/20"]
+            df_dist = df_dist[df_dist['type'].isin(target_types)]
+            
+            if df_dist.empty:
+                st.info("Keine Workouts im gewählten Zeitraum für LIT, MIT, HIT oder HIT 40/20 gefunden.")
+            else:
+                
+                c_chart1, c_chart2 = st.columns(2)
+                
+                with c_chart1:
+                    df_counts = df_dist['type'].value_counts().reindex(target_types, fill_value=0).reset_index()
+                    df_counts.columns = ['Workout Typ', 'Anzahl']
+                    
+                    fig_counts = px.bar(df_counts, x='Workout Typ', y='Anzahl', title="Häufigkeit der Workout Typen", 
+                                        color='Workout Typ', category_orders={"Workout Typ": target_types},
+                                        color_discrete_sequence=px.colors.qualitative.Plotly)
+                    fig_counts.update_layout(template="plotly_dark", showlegend=False, margin=dict(t=40, b=0, l=0, r=0), height=350)
+                    fig_counts.update_traces(textposition='auto', texttemplate='%{y}')
+                    st.plotly_chart(fig_counts, use_container_width=True)
+                    
+                with c_chart2:
+                    df_time = df_dist.groupby('type')['real_time'].sum().reindex(target_types, fill_value=0).reset_index()
+                    df_time.columns = ['Workout Typ', 'Gesamtzeit (Min)']
+                    
+                    fig_time = px.bar(df_time, x='Workout Typ', y='Gesamtzeit (Min)', title="Summierte Intervall-/Blockzeiten", 
+                                      color='Workout Typ', category_orders={"Workout Typ": target_types},
+                                      color_discrete_sequence=px.colors.qualitative.Plotly)
+                    fig_time.update_layout(template="plotly_dark", showlegend=False, margin=dict(t=40, b=0, l=0, r=0), height=350)
+                    fig_time.update_traces(textposition='auto', texttemplate='%{y} Min')
+                    st.plotly_chart(fig_time, use_container_width=True)
+                    
+                st.markdown("##### Verteilung nach Struktur (z.B. 4x6, 6x3)")
+                
+                c_sub = st.columns(4)
+                for idx, w_type in enumerate(target_types):
+                    with c_sub[idx]:
+                        df_sub = df_dist[df_dist['type'] == w_type]
+                        if not df_sub.empty:
+                            df_sub_counts = df_sub['real_structure'].value_counts().reset_index()
+                            df_sub_counts.columns = ['Struktur', 'Anzahl']
+                            df_sub_counts = df_sub_counts.sort_values('Anzahl', ascending=False)
+                            
+                            fig_sub = px.bar(df_sub_counts, x='Struktur', y='Anzahl', title=f"{w_type}",
+                                             color_discrete_sequence=[px.colors.qualitative.Plotly[idx % len(px.colors.qualitative.Plotly)]])
+                            fig_sub.update_layout(template="plotly_dark", showlegend=False, xaxis_title=None, yaxis_title=None, margin=dict(l=0, r=0, t=30, b=0), height=300)
+                            fig_sub.update_traces(textposition='auto', texttemplate='%{y}')
+                            st.plotly_chart(fig_sub, use_container_width=True)
+                        else:
+                            st.info(f"Keine {w_type} Workouts.")
