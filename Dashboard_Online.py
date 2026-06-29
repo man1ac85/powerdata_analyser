@@ -13,6 +13,9 @@ import hashlib
 import requests
 from requests.auth import HTTPBasicAuth
 from sqlalchemy import text
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 
 # --- DATENBANK & KONFIGURATION ---
 st.set_page_config(page_title="Advanced Power Data Analyser", layout="wide")
@@ -127,6 +130,15 @@ def get_athlete_stats_from_intervals(api_key, athlete_id):
 def get_db_connection():
     # Streamlit connection (nutzt automatisch psycopg3, wenn in requirements.txt)
     return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
+    
+def check_and_add_eff_loss_column():
+    conn = get_db_connection()
+    try:
+        with conn.session as s:
+            s.execute(text('ALTER TABLE intervals ADD COLUMN IF NOT EXISTS eff_loss FLOAT;'))
+            s.commit()
+    except Exception: pass
+check_and_add_eff_loss_column()
 
 def render_analysis_ui(df, filename, active_user_id, selected_activity_id, default_min_power, ftp_val, is_admin, key_suffix="", is_bulk=False):
     try:
@@ -563,6 +575,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
 
             # --- BERECHNUNG DER KENNWERTE ---
             intervals_calculated = []
+            unique_blocks = []
             if num_intervals > 0:
                 unique_blocks = df[df['is_interval']]['block_id'].unique()
                 
@@ -621,6 +634,17 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                     if hr_threshold and not hr_data.empty:
                         time_above_88 = len(hr_data[hr_data >= hr_threshold])
                         
+                    eff_loss = 0.0
+                    if not hr_data.empty and not block_df['power'].empty:
+                        roll_p = block_df['power'].rolling('20s').mean()
+                        roll_hr = hr_data.rolling('20s').mean()
+                        roll_eff = (roll_p / roll_hr).replace([np.inf, -np.inf], np.nan).fillna(0)
+                        valid = roll_eff > 0
+                        if valid.sum() > 10: 
+                            t_sec = (block_df.index - block_df.index[0]).total_seconds().values
+                            slope, _ = np.polyfit(t_sec[valid], roll_eff[valid], 1)
+                            eff_loss = slope * 60
+                        
                     int_num_display = int(interval_nums.get(idx_blk, idx_blk)) if not is_ride_analysis and mode_type == "Automatisch (Algorithmus)" else int(idx_blk)
                         
                     intervals_calculated.append({
@@ -628,6 +652,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                         "Ø Watt": avg_p, 
                         "Ø HF": avg_hr, 
                         "Efficiency": float(round(efficiency, 2)),
+                        "EffLoss": float(round(eff_loss, 4)),
                         "NP": float(round(np_val, 1)),
                         "Max HF": max_hr, 
                         "Δ HF+-": std_hr, 
@@ -669,11 +694,23 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                             if hr_threshold and not mac_hr_data.empty:
                                 mac_time_above_88 = len(mac_hr_data[mac_hr_data >= hr_threshold])
                                 
+                            mac_eff_loss = 0.0
+                            if not mac_hr_data.empty and not macro_df['power'].empty:
+                                m_roll_p = macro_df['power'].rolling('20s').mean()
+                                m_roll_hr = mac_hr_data.rolling('20s').mean()
+                                m_roll_eff = (m_roll_p / m_roll_hr).replace([np.inf, -np.inf], np.nan).fillna(0)
+                                m_valid = m_roll_eff > 0
+                                if m_valid.sum() > 10:
+                                    m_t_sec = (macro_df.index - macro_df.index[0]).total_seconds().values
+                                    m_slope, _ = np.polyfit(m_t_sec[m_valid], m_roll_eff[m_valid], 1)
+                                    mac_eff_loss = m_slope * 60
+                                
                             intervals_calculated.append({
                                 "Intervall": m_idx * 100,
                                 "Ø Watt": mac_avg_p,
                                 "Ø HF": mac_avg_hr,
                                 "Efficiency": float(round(mac_efficiency, 2)),
+                                "EffLoss": float(round(mac_eff_loss, 4)),
                                 "NP": float(round(mac_np_val, 1)),
                                 "Max HF": mac_max_hr,
                                 "Δ HF+-": mac_std_hr,
@@ -903,6 +940,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                         "Ø Watt": metadata["int_avg_power"],
                         "Ø HF": metadata["int_avg_hr"],
                         "Efficiency": metadata["int_avg_eff"],
+                        "EffLoss": float(round(sum(i["EffLoss"] for i in real_ints) / len(real_ints), 4)) if real_ints else 0.0,
                         "NP": float(round(sum(i["NP"] for i in real_ints) / len(real_ints), 1)),
                         "Max HF": int(round(sum(i["Max HF"] for i in real_ints) / len(real_ints))),
                         "Δ HF+-": float(round(sum(i["Δ HF+-"] for i in real_ints) / len(real_ints), 1)),
@@ -913,7 +951,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                     display_df = pd.concat([display_df, pd.DataFrame([avg_row])], ignore_index=True)
                     
                     styled_df = display_df.style.format({
-                        "Ø Watt": "{:.0f}", "Ø HF": "{:.0f}", "Efficiency": "{:.2f}", "NP": "{:.1f}",
+                        "Ø Watt": "{:.0f}", "Ø HF": "{:.0f}", "Efficiency": "{:.2f}", "EffLoss": "{:.4f}", "NP": "{:.1f}",
                         "Max HF": "{:.0f}", "Δ HF+-": "{:.1f}", "Ø HF_P (20-80)": "{:.0f}"
                     }).set_properties(**{'text-align': 'center'}).set_table_styles([{'selector': 'th', 'props': [('text-align', 'center')]}])
                     st.dataframe(
@@ -925,6 +963,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                             "Ø Watt": st.column_config.Column("Ø Watt", width=40),
                             "Ø HF": st.column_config.Column("Ø HF", width=40),
                             "Efficiency": st.column_config.Column("Efficiency", width=40),
+                            "EffLoss": st.column_config.Column("EffLoss", width=40),
                             "NP": st.column_config.Column("NP", width=40),
                             "Max HF": st.column_config.Column("Max HF", width=40),
                             "Δ HF+-": st.column_config.Column("Δ HF+-", width=40),
@@ -1030,6 +1069,25 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                         
                     fig_map.update_layout(mapbox_style="open-street-map", mapbox=dict(center=dict(lat=df_map['lat'].mean(), lon=df_map['lon'].mean()), zoom=10), margin=dict(l=0, r=0, t=0, b=0), height=450, showlegend=False)
                     st.plotly_chart(fig_map, use_container_width=True, key=f"map_{key_suffix}")
+                if has_hr:
+                    with st.expander("📈 Herzfrequenz-Kurve (Time in Zone)", expanded=False):
+                        hr_data_full = df['heart_rate'].dropna()
+                        if not hr_data_full.empty:
+                            hr_sorted = np.sort(hr_data_full)[::-1]
+                            time_min = np.arange(1, len(hr_sorted) + 1) / 60.0
+                            
+                            fig_hr_curve = go.Figure()
+                            fig_hr_curve.add_trace(go.Scatter(x=time_min, y=hr_sorted, mode='lines', name='HF Kurve', line=dict(color='#FF3333', width=2)))
+                            fig_hr_curve.update_layout(
+                                template="plotly_dark",
+                                xaxis_title="Kumulierte Zeit (logarithmisch)",
+                                yaxis_title="Herzfrequenz (bpm)",
+                                margin=dict(l=0, r=0, t=10, b=0),
+                                height=450,
+                                hovermode="x unified"
+                            )
+                        fig_hr_curve.update_xaxes(type="log", tickvals=[0.1, 1, 5, 10, 30, 60, 120, 240], ticktext=["6s", "1m", "5m", "10m", "30m", "1h", "2h", "4h"])
+                        st.plotly_chart(fig_hr_curve, use_container_width=True, key=f"hr_curve_{key_suffix}")
             
             if mode_type == "Manuell (Grafische Auswahl)":
                 st.markdown("### Manuelle Intervall-Bearbeitung")
@@ -1170,6 +1228,7 @@ def add_new_athlete(name, api_key, password, intervals_id, approved=True):
                 VALUES (:name, :api_key, :pwd, 'user', :iid, :approved)
             """), {"name": name.strip(), "api_key": api_key.strip(), "pwd": pwd_hash, "iid": intervals_id.strip(), "approved": approved})
         except Exception:
+            s.rollback()
             # Fallback, falls die SQL-Anweisung in Supabase noch nicht durchgeführt wurde
             s.execute(text("""
                 INSERT INTO users (name, api_key, password_hash, role, intervals_id) 
@@ -1243,8 +1302,8 @@ def save_workout_to_db(metadata, interval_list, overwrite_id=None):
         for row in interval_list:
             # Konvertiere jeden Wert sicher in einen Python-Typ (float oder int)
             s.execute(text("""
-                                INSERT INTO intervals (workout_id, interval_num, avg_power, avg_hr, max_hr, duration_sec, std_hr, avg_hr_p, "NP_int", intervall_eff, time_above_88_hr) 
-                                VALUES (:wid, :num, :ap, :ahr, :mhr, :dur, :std, :ahrp, :np, :eff, :t88)
+                                INSERT INTO intervals (workout_id, interval_num, avg_power, avg_hr, max_hr, duration_sec, std_hr, avg_hr_p, "NP_int", intervall_eff, time_above_88_hr, eff_loss) 
+                                VALUES (:wid, :num, :ap, :ahr, :mhr, :dur, :std, :ahrp, :np, :eff, :t88, :eff_loss)
             """), {
                 "wid": int(workout_id),
                 "num": int(row['Intervall']),
@@ -1256,7 +1315,8 @@ def save_workout_to_db(metadata, interval_list, overwrite_id=None):
                 "ahrp": float(row['Ø HF_P (20-80)']),
                 "np": float(row['NP']),
                                 "eff": float(row['Efficiency']),
-                                "t88": int(row.get('>= 88% HF (s)', 0))
+                "t88": int(row.get('>= 88% HF (s)', 0)),
+                "eff_loss": float(row.get('EffLoss', 0.0))
             })
         s.commit()
     st.cache_data.clear()
@@ -1272,7 +1332,7 @@ def fetch_compare_from_db(selected_ids):
     if not selected_ids: return pd.DataFrame()
     conn = get_db_connection()
     ids_string = ",".join(map(str, selected_ids))
-    return conn.query(f"SELECT i.*, w.date, w.type FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})", ttl=0)
+    return conn.query(f"SELECT i.*, w.date, w.type, w.filename, w.intervals_activity_id FROM intervals i JOIN workouts w ON i.workout_id = w.id WHERE i.workout_id IN ({ids_string})", ttl=0)
 
 def transfer_to_manual(timestamps):
     st.session_state['manual_intervals'] = timestamps
@@ -1359,38 +1419,73 @@ def download_original_fit_file(api_key, activity_id):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_activity_df(act_id, api_key):
-    """Lädt DataFrame bevorzugt aus Parquet. Falls nicht vorhanden, via FIT-Download und lädt neues Parquet hoch."""
+    """Lädt DataFrame bevorzugt aus Parquet. Falls nicht, via FIT-Download oder als Fallback über die Streams API."""
+    clean_act_id = str(act_id).strip()
+    if clean_act_id.endswith(".0"): clean_act_id = clean_act_id[:-2]
+    if clean_act_id in ["", "None", "nan"]: return pd.DataFrame()
+    
     if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
         try:
             from supabase import create_client
             sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-            res_bytes = sb.storage.from_("workouts").download(f"workout_{act_id}.parquet")
+            res_bytes = sb.storage.from_("workouts").download(f"workout_{clean_act_id}.parquet")
             return pd.read_parquet(io.BytesIO(res_bytes))
         except Exception:
             pass
             
-    bin_data, _ = download_original_fit_file(api_key, act_id)
+    df_fit = pd.DataFrame()
+    bin_data, _ = download_original_fit_file(api_key, clean_act_id)
     if bin_data:
         try:
             fitfile = fitparse.FitFile(io.BytesIO(bin_data))
-            df_fit = pd.DataFrame([r.get_values() for r in fitfile.get_messages('record')])
+            records = [r.get_values() for r in fitfile.get_messages('record')]
+            df_fit = pd.DataFrame(records)
             if not df_fit.empty and 'timestamp' in df_fit.columns:
                 df_fit['timestamp'] = pd.to_datetime(df_fit['timestamp'])
                 df_fit.set_index('timestamp', inplace=True)
-                if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
-                    try:
-                        for col in df_fit.columns:
-                            if df_fit[col].dtype == 'object': df_fit[col] = df_fit[col].astype(str)
-                        parquet_buffer = io.BytesIO()
-                        df_fit.to_parquet(parquet_buffer, engine='pyarrow', index=True)
-                        parquet_buffer.seek(0)
-                        from supabase import create_client
-                        sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-                        sb.storage.from_("workouts").upload(f"workout_{act_id}.parquet", parquet_buffer.read(), {"content-type": "application/octet-stream"})
-                    except Exception: pass
-                return df_fit
+        except Exception: 
+            pass
+
+    # Fallback auf Streams API
+    if df_fit.empty:
+        url = f"https://intervals.icu/api/v1/activity/{clean_act_id}/streams"
+        try:
+            params = {"types": "time,watts,heartrate,latlng,altitude"}
+            response = requests.get(url, params=params, auth=HTTPBasicAuth('API_KEY', api_key), timeout=15)
+            if response.status_code == 200:
+                streams = response.json()
+                stream_dict = {}
+                for s in streams:
+                    stype = s.get("type")
+                    if stype in ["time", "watts", "heartrate", "latlng", "altitude"]:
+                        if stype == "latlng":
+                            coords = s.get("data", [])
+                            stream_dict["position_lat"] = [c[0] if len(c)>0 else None for c in coords]
+                            stream_dict["position_long"] = [c[1] if len(c)>1 else None for c in coords]
+                        else:
+                            stream_dict[stype] = s.get("data")
+                if "time" in stream_dict:
+                    df_fit = pd.DataFrame(stream_dict)
+                    if "watts" in df_fit.columns: df_fit.rename(columns={"watts": "power"}, inplace=True)
+                    if "heartrate" in df_fit.columns: df_fit.rename(columns={"heartrate": "heart_rate"}, inplace=True)
+                    df_fit['timestamp'] = pd.Timestamp("2024-01-01") + pd.to_timedelta(df_fit['time'], unit='s')
+                    df_fit.set_index('timestamp', inplace=True)
+        except Exception:
+            pass
+
+    if not df_fit.empty and "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
+        try:
+            for col in df_fit.columns:
+                if df_fit[col].dtype == 'object': df_fit[col] = df_fit[col].astype(str)
+            parquet_buffer = io.BytesIO()
+            df_fit.to_parquet(parquet_buffer, engine='pyarrow', index=True)
+            parquet_buffer.seek(0)
+            from supabase import create_client
+            sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+            sb.storage.from_("workouts").upload(f"workout_{clean_act_id}.parquet", parquet_buffer.read(), {"content-type": "application/octet-stream"})
         except Exception: pass
-    return pd.DataFrame()
+        
+    return df_fit
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_upcoming_events(api_key, athlete_id):
@@ -1462,14 +1557,14 @@ with col_logout:
             st.session_state['user_id'] = None
             st.rerun()
 
-nav_options = ["Training einlesen", "Daten & Auswertung", "Trendanalyse", "🧠 Smart Workout Builder", "⚙️ Einstellungen"]
+nav_options = ["Training einlesen", "Daten & Auswertung", "Fatigue Resistance", "Trendanalyse", "🧠 Smart Workout Builder", "⚙️ Einstellungen"]
 if st.session_state.get('role') == 'admin':
     nav_options.append("👤 Athleten verwalten")
     nav_options.append("Bulk Data Analyser")
 
 tabs = st.tabs(nav_options)
 
-with tabs[3]:
+with tabs[4]:
     st.subheader("🧠 Smart Workout Builder")
     st.markdown("Definiere deine Rahmenbedingungen. Der Builder findet alle mathematisch möglichen Intervall-Kombinationen, die deinen Vorgaben entsprechen.")
     
@@ -1726,7 +1821,7 @@ with tabs[3]:
                         if ok: st.success(msg)
                         else: st.error(msg)
 
-with tabs[4]:
+with tabs[5]:
     st.subheader("⚙️ Einstellungen")
     st.markdown("### 🔑 Passwort ändern")
     with st.form("change_pwd_form", clear_on_submit=True):
@@ -1749,7 +1844,7 @@ with tabs[4]:
 
 # --- ADMIN-CHECK ---
 if len(tabs) > 5:
-    with tabs[5]:
+    with tabs[6]:
         # WICHTIG: Alles ab hier muss eingerückt sein!
         if st.session_state.get('role') == 'admin':
             st.subheader("🛠️ Admin: Athleten verwalten")
@@ -1889,7 +1984,7 @@ if len(tabs) > 5:
             st.error("Zugriff verweigert! Nur für den Administrator.")
 
 if len(tabs) > 6:
-    with tabs[6]:
+    with tabs[7]:
         if st.session_state.get('role') == 'admin':
             st.subheader("🚀 Bulk Data Analyser")
             
@@ -1946,9 +2041,9 @@ if len(tabs) > 6:
                     bulk_uid = int(bulk_user_row["id"])
                     
                     with b_col2:
-                        bulk_start = st.date_input("Start-Datum", datetime.now() - timedelta(days=60), format="DD.MM.YYYY", key="bulk_start", on_change=clear_bulk_targets)
+                        bulk_start = st.date_input("Start-Datum", datetime.now() - timedelta(days=60), format="DD-MM-YYYY", key="bulk_start", on_change=clear_bulk_targets)
                     with b_col3:
-                        bulk_end = st.date_input("End-Datum", datetime.now(), format="DD.MM.YYYY", key="bulk_end", on_change=clear_bulk_targets)
+                        bulk_end = st.date_input("End-Datum", datetime.now(), format="DD-MM-YYYY", key="bulk_end", on_change=clear_bulk_targets)
                         
                     b_tags = st.multiselect("Intensität (Bulk):", ["HIT", "MIT", "LIT", "HIT 40/20", "GA", "RSH", "Draußen"], default=[], key="bulk_tags", on_change=clear_bulk_targets)
                     
@@ -2051,9 +2146,9 @@ with tabs[0]:
         intervals_id = active_user_row.get("intervals_id", "0")
         
         with col_u2:
-            start_date = st.date_input("Start-Datum", datetime.now() - timedelta(days=60), format="DD.MM.YYYY")
+            start_date = st.date_input("Start-Datum", datetime.now() - timedelta(days=60), format="DD-MM-YYYY")
         with col_u3:
-            end_date = st.date_input("End-Datum", datetime.now(), format="DD.MM.YYYY")
+            end_date = st.date_input("End-Datum", datetime.now(), format="DD-MM-YYYY")
 
         if 'ftp_cache' not in st.session_state: st.session_state['ftp_cache'] = {}
         if active_user_id not in st.session_state['ftp_cache']:
@@ -2102,7 +2197,7 @@ with tabs[0]:
                 matches_custom = custom_search.lower() in ev_name.lower() if custom_search else True
                 if matches_tag and matches_custom:
                     date_raw = e.get("start_date_local", "0000-00-00")[:10]
-                    date_str = f"{date_raw[8:10]}.{date_raw[5:7]}.{date_raw[0:4]}" if len(date_raw) == 10 else date_raw
+                    date_str = f"{date_raw[8:10]}-{date_raw[5:7]}-{date_raw[0:4]}" if len(date_raw) == 10 else date_raw
                     filtered_events.append({
                         "Datum": date_str, 
                         "Name": ev_name,
@@ -2159,6 +2254,212 @@ with tabs[0]:
     else:
         st.info("Bitte Athlet wählen oder Datei hochladen.")
 
+with tabs[2]:
+    st.subheader("🔋 Fatigue Resistance & Efficiency Loss")
+    
+    authorized_athletes_fr = get_authorized_athletes(st.session_state['user'], st.session_state['role'], st.session_state.get('user_id'))
+    
+    if authorized_athletes_fr.empty:
+        st.warning("Keine Athleten gefunden.")
+    else:
+        if 'fr_selected_ids' not in st.session_state:
+            st.session_state['fr_selected_ids'] = []
+            
+        def toggle_fr_workout(wid):
+            if wid in st.session_state['fr_selected_ids']:
+                st.session_state['fr_selected_ids'].remove(wid)
+            else:
+                st.session_state['fr_selected_ids'].append(wid)
+
+        c1, c2 = st.columns([2, 6])
+        
+        with c1:
+            c_sel1, c_sel2 = st.columns(2)
+            opts_fr = authorized_athletes_fr["name"].tolist()
+            def_idx_fr = opts_fr.index(st.session_state['user']) if st.session_state['user'] in opts_fr else 0
+            with c_sel1:
+                selected_name_fr = st.selectbox("Athlet wählen:", options=opts_fr, index=def_idx_fr, key="fr_athlete_selector")
+            athlete_row_fr = authorized_athletes_fr[authorized_athletes_fr["name"] == selected_name_fr].iloc[0]
+            with c_sel2:
+                filter_type_fr = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT", "HIT 40/20", "GA", "RSH", "Draußen"], key="fr_filter_type")
+            
+            c_d1, c_d2 = st.columns(2)
+            with c_d1: fr_start = st.date_input("Von", datetime.now() - timedelta(days=14), format="DD.MM.YYYY", key="fr_start")
+            with c_d2: fr_end = st.date_input("Bis", datetime.now(), format="DD.MM.YYYY", key="fr_end")
+            search_query_fr = st.text_input("Suche:", key="fr_search_input")
+
+        uid_val_fr = int(athlete_row_fr['id'])
+        df_workouts_fr = fetch_workouts_from_db(uid_val_fr)
+        
+        if not df_workouts_fr.empty:
+            conn_fr = get_db_connection()
+            try:
+                valid_eff_workouts = conn_fr.query("SELECT DISTINCT workout_id FROM intervals WHERE eff_loss IS NOT NULL AND workout_id IN (SELECT id FROM workouts WHERE user_id = :uid)", params={"uid": uid_val_fr}, ttl=0)
+                valid_eff_ids = valid_eff_workouts['workout_id'].tolist() if not valid_eff_workouts.empty else []
+                df_workouts_fr = df_workouts_fr[df_workouts_fr['id'].isin(valid_eff_ids)]
+            except Exception:
+                df_workouts_fr = pd.DataFrame()
+        
+        if df_workouts_fr.empty: 
+            st.info(f"Keine Trainingsdaten mit berechnetem 'Efficiency Loss' für {selected_name_fr} gefunden.")
+            st.info("💡 Lade alte Workouts unter dem Reiter 'Training einlesen' kurz erneut aus der Cloud rein und speichere sie ab, um die Kennzahl nachträglich zu generieren!")
+        else:
+            df_workouts_fr['date_dt'] = pd.to_datetime(df_workouts_fr['date'], errors='coerce')
+            df_workouts_fr = df_workouts_fr.dropna(subset=['date_dt'])
+            df_workouts_fr = df_workouts_fr.sort_values(by='date_dt', ascending=False)
+            df_all_user_workouts_fr = df_workouts_fr.copy()
+
+            if filter_type_fr != "ALLE": 
+                df_workouts_fr = df_workouts_fr[df_workouts_fr['type'] == filter_type_fr]
+            
+            mask_date_fr = (df_workouts_fr['date_dt'].dt.date >= fr_start) & (df_workouts_fr['date_dt'].dt.date <= fr_end)
+            df_workouts_fr = df_workouts_fr[mask_date_fr]
+
+            if search_query_fr:
+                df_workouts_fr = df_workouts_fr[df_workouts_fr['filename'].str.contains(search_query_fr, case=False, na=False) | df_workouts_fr['date'].str.contains(search_query_fr, case=False, na=False)]
+
+            df_all_user_workouts_fr = df_all_user_workouts_fr.sort_values(by='date_dt')
+            df_all_user_workouts_fr['date_fmt'] = df_all_user_workouts_fr['date_dt'].dt.strftime('%d.%m.%Y')
+            all_possible_workouts_fr = (df_all_user_workouts_fr['date_fmt'] + " (" + df_all_user_workouts_fr['type'] + ")").unique()
+            all_possible_workouts_fr = list(dict.fromkeys(all_possible_workouts_fr))
+            plotly_colors_fr = px.colors.qualitative.Plotly
+            extended_colors_fr = plotly_colors_fr * (len(all_possible_workouts_fr) // len(plotly_colors_fr) + 1)
+            global_color_map_fr = {w: extended_colors_fr[i] for i, w in enumerate(all_possible_workouts_fr)}
+
+            with c2:
+                c_list_fr, c_sel_fr = st.columns([1.5, 1])
+                with c_list_fr:
+                    st.markdown("##### 🗂️ Suchergebnis (Workouts)")
+                    if df_workouts_fr.empty:
+                        st.info("Keine Workouts passend zu Filter & Zeitraum gefunden.")
+                    else:
+                        for idx, row in df_workouts_fr.iterrows():
+                            date_str = row['date_dt'].strftime('%d.%m.%Y')
+                            is_sel = row['id'] in st.session_state['fr_selected_ids']
+                            st.checkbox(f"{date_str} | {row['type']} ({row['structure']}) | {row['filename']}", value=is_sel, key=f"fr_check_{row['id']}", on_change=toggle_fr_workout, args=(row['id'],))
+
+                with c_sel_fr:
+                    st.markdown("##### 📌 Ausgewählt zum Vergleich")
+                    if not st.session_state['fr_selected_ids']:
+                        st.info("Noch keine Workouts markiert.")
+                    else:
+                        sel_rows_fr = df_all_user_workouts_fr[df_all_user_workouts_fr['id'].isin(st.session_state['fr_selected_ids'])]
+                        sel_rows_fr = sel_rows_fr.sort_values(by='date_dt', ascending=False)
+                        for _, srow in sel_rows_fr.iterrows():
+                            s_date_str = srow['date_dt'].strftime('%d.%m.%Y')
+                            st.markdown(f"- **{s_date_str}**: {srow['type']} ({srow['structure']})")
+                        if st.button("🗑️ Auswahl aufheben", use_container_width=True, key="fr_clear_sel"):
+                            st.session_state['fr_selected_ids'] = []
+                            st.rerun()
+
+            selected_ids_to_render_fr = st.session_state['fr_selected_ids']
+            if len(selected_ids_to_render_fr) >= 1:
+                st.markdown("---")
+                df_compare_fr = fetch_compare_from_db(selected_ids_to_render_fr)
+                
+                if not df_compare_fr.empty:
+                    if 'eff_loss' not in df_compare_fr.columns:
+                        df_compare_fr['eff_loss'] = None
+                        
+                    missing_eff = df_compare_fr['eff_loss'].isna().any()
+                    if missing_eff:
+                        st.warning("⚠️ Eines oder mehrere der ausgewählten Workouts haben noch keine berechneten Werte für 'Efficiency Loss'.")
+                        st.info("💡 Lade diese Workouts einfach unter dem Reiter 'Training einlesen' kurz erneut aus der Cloud rein und speichere sie ab. Der Algorithmus berechnet die neue Kennzahl dann automatisch mit!")
+
+                    has_micro_fr = (df_compare_fr['interval_num'] > 100).any()
+                    show_micro_fr = False
+                    if has_micro_fr:
+                        show_micro_fr = st.checkbox("Einzelansicht (Micro-Intervalle)", value=False, key="fr_show_micro")
+                        
+                    df_compare_fr['date_dt'] = pd.to_datetime(df_compare_fr['date'], errors='coerce')
+                    df_compare_fr['date_fmt'] = df_compare_fr['date_dt'].dt.strftime('%d.%m.%Y')
+                    df_compare_fr['Workout'] = df_compare_fr['date_fmt'] + " (" + df_compare_fr['type'] + ")"
+                    
+                    if has_micro_fr and not show_micro_fr:
+                        normal_df = df_compare_fr[df_compare_fr['interval_num'] <= 100].copy()
+                        macro_averages = df_compare_fr[(df_compare_fr['interval_num'] > 100) & (df_compare_fr['interval_num'] % 100 == 0)].copy()
+                        micro_df = df_compare_fr[(df_compare_fr['interval_num'] > 100) & (df_compare_fr['interval_num'] % 100 != 0)].copy()
+                        micro_df['macro_num'] = micro_df['interval_num'] // 100
+                        
+                        existing_macros = set(zip(macro_averages['Workout'], macro_averages['interval_num'] // 100))
+                        fallback_micros = micro_df[~micro_df.apply(lambda row: (row['Workout'], row['macro_num']) in existing_macros, axis=1)]
+                        
+                        if not fallback_micros.empty:
+                            agg_dict = {'avg_power': 'mean', 'avg_hr': 'mean', 'max_hr': 'max', 'duration_sec': 'sum', 'date': 'first', 'type': 'first', 'date_dt': 'first'}
+                            if 'filename' in fallback_micros.columns: agg_dict['filename'] = 'first'
+                            if 'intervals_activity_id' in fallback_micros.columns: agg_dict['intervals_activity_id'] = 'first'
+                            if 'workout_id' in fallback_micros.columns: agg_dict['workout_id'] = 'first'
+                            for col in ['std_hr', 'avg_hr_p', 'intervall_eff', 'NP_int', 'time_above_88_hr', 'eff_loss']:
+                                if col in fallback_micros.columns: agg_dict[col] = 'mean'
+                            grouped = fallback_micros.groupby(['Workout', 'macro_num'], as_index=False).agg(agg_dict)
+                            grouped.rename(columns={'macro_num': 'interval_num'}, inplace=True)
+                            df_compare_fr = pd.concat([normal_df, macro_averages, grouped], ignore_index=True)
+                        else:
+                            df_compare_fr = pd.concat([normal_df, macro_averages], ignore_index=True)
+                            
+                    df_compare_fr = df_compare_fr.sort_values(['date_dt', 'interval_num'])
+                    df_compare_fr['int_label'] = df_compare_fr['interval_num'].apply(lambda x: f"Block {x//100} Average" if x >= 100 and x % 100 == 0 else (f"B{x//100}.{x%100:02d}" if x > 100 else str(x)))
+                    
+                    workout_dates_fr = df_compare_fr[['Workout', 'date_dt']].drop_duplicates(subset=['Workout'])
+                    workout_dates_fr = workout_dates_fr.sort_values(by='date_dt', ascending=True)
+                    sorted_workouts_fr = workout_dates_fr['Workout'].tolist()
+                    
+                    st.markdown("#### Fatigue Resistance / Efficiency Loss")
+                    
+                    c_p1, c_p2 = st.columns(2)
+                    with c_p1: 
+                        fig1 = px.scatter(df_compare_fr, x="int_label", y="eff_loss", color="Workout", title="Efficiency Loss (W*min/bpm)", color_discrete_map=global_color_map_fr, category_orders={"Workout": sorted_workouts_fr})
+                        fig1.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
+                        if not show_micro_fr: fig1.update_xaxes(tick0=1, dtick=1)
+                        st.plotly_chart(fig1, use_container_width=True)
+                    with c_p2:
+                        def determine_int_type(row):
+                            combined = str(row.get('type', '')).upper() + " " + str(row.get('filename', '')).upper()
+                            if any(x in combined for x in ['HIT', 'RSH', '40/20']): return 'HIT'
+                            if 'MIT' in combined: return 'MIT'
+                            if any(x in combined for x in ['LIT', 'GA']): return 'LIT'
+                            return 'Andere'
+                            
+                        df_compare_fr['Int_Type'] = df_compare_fr.apply(determine_int_type, axis=1)
+                        
+                        env_map = {}
+                        for w_id in df_compare_fr['workout_id'].dropna().unique():
+                            w_rows = df_compare_fr[df_compare_fr['workout_id'] == w_id]
+                            if w_rows.empty: continue
+                            act_id = w_rows['intervals_activity_id'].iloc[0] if 'intervals_activity_id' in w_rows.columns else None
+                            w_type = w_rows['type'].iloc[0] if 'type' in w_rows.columns else ''
+                            w_fname = w_rows['filename'].iloc[0] if 'filename' in w_rows.columns else ''
+                            combined_env = str(w_type).lower() + " " + str(w_fname).lower()
+                            
+                            clean_act_id = None
+                            if pd.notna(act_id) and str(act_id).strip() not in ["", "None", "nan"]:
+                                clean_act_id = str(act_id).strip()
+                                if clean_act_id.endswith(".0"): clean_act_id = clean_act_id[:-2]
+                                
+                            if any(kw in combined_env for kw in ['indoor', 'zwift', 'virtual', 'trainerroad', 'rouvy', 'ergdb']):
+                                env_map[w_id] = 'Indoor'
+                            elif any(kw in combined_env for kw in ['draußen', 'outdoor', 'draussen']):
+                                env_map[w_id] = 'Outdoor'
+                            elif clean_act_id:
+                                try:
+                                    df_temp = get_activity_df(clean_act_id, athlete_row_fr['api_key'])
+                                    has_gps = False
+                                    if not df_temp.empty and 'position_lat' in df_temp.columns:
+                                        if not df_temp['position_lat'].dropna().empty: has_gps = True
+                                    env_map[w_id] = 'Outdoor' if has_gps else 'Indoor'
+                                except Exception:
+                                    env_map[w_id] = 'Indoor'
+                            else:
+                                env_map[w_id] = 'Outdoor' if any(kw in combined_env for kw in ['ride', 'fahrt', 'radfahren', 'rennradfahren']) else 'Indoor'
+                                
+                        df_compare_fr['Environment'] = df_compare_fr['workout_id'].map(env_map)
+                        
+                        color_map = {'LIT': '#FFD700', 'MIT': '#FFA500', 'HIT': '#FF3333', 'Andere': '#A9A9A9'}
+                        fig2 = px.scatter(df_compare_fr, x="avg_power", y="eff_loss", color="Int_Type", symbol="Environment", color_discrete_map=color_map, symbol_map={'Indoor': 'circle', 'Outdoor': 'star'}, hover_data={'Workout': True, 'int_label': True, 'Int_Type': False, 'Environment': False}, title="Efficiency Loss vs. Ø Leistung (Intervall)")
+                        fig2.update_traces(marker=dict(size=12, opacity=0.85, line=dict(width=1, color='rgba(255,255,255,0.3)')))
+                        fig2.update_layout(template="plotly_dark", xaxis_title="Ø Watt (Intervall)", yaxis_title="Efficiency Loss (W*min/bpm)", legend_title="Typ & Umgebung")
+                        st.plotly_chart(fig2, use_container_width=True)
+
 with tabs[1]:
     st.subheader("📊 Daten & Auswertung")
     
@@ -2185,14 +2486,13 @@ with tabs[1]:
             def_idx_eval = opts_eval.index(st.session_state['user']) if st.session_state['user'] in opts_eval else 0
             with c_sel1:
                 selected_name = st.selectbox("Athlet wählen:", options=opts_eval, index=def_idx_eval, key="data_eval_athlete_selector")
-           
             athlete_row = authorized_athletes[authorized_athletes["name"] == selected_name].iloc[0]
             with c_sel2:
                 filter_type = st.selectbox("Typ-Filter", ["ALLE", "LIT", "MIT", "HIT", "HIT 40/20", "GA", "RSH", "Draußen"], key="data_eval_filter_type")
- 
+            
             c_d1, c_d2 = st.columns(2)
-            with c_d1: eval_start = st.date_input("Von", datetime.now() - timedelta(days=14), format="DD.MM.YYYY", key="eval_start")
-            with c_d2: eval_end = st.date_input("Bis", datetime.now(), format="DD.MM.YYYY", key="eval_end")
+            with c_d1: eval_start = st.date_input("Von", datetime.now() - timedelta(days=14), format="DD-MM-YYYY", key="eval_start")
+            with c_d2: eval_end = st.date_input("Bis", datetime.now(), format="DD-MM-YYYY", key="eval_end")
             search_query = st.text_input("Suche:", key="data_eval_search_input")
 
         with c2:
@@ -2220,7 +2520,7 @@ with tabs[1]:
                 <thead>
                     <tr>
                         <th style="text-align: left; padding-bottom: 8px; border-bottom: 1px solid #444;">{selected_name}</th>
-                        <th style="text-align: left; padding-bottom: 8px; border-bottom: 1px solid #444;">Stand: {datetime.now().strftime('%d.%m.%y')}</th>
+                        <th style="text-align: left; padding-bottom: 8px; border-bottom: 1px solid #444;">Stand: {datetime.now().strftime('%d-%m-%Y')}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -2239,7 +2539,7 @@ with tabs[1]:
                 events_html = "<ul style='margin-top: 0; padding-left: 20px; line-height: 1.4; font-size: 0.9rem;'>"
                 for r in upcoming_races[:3]:
                     r_date = r.get('start_date_local', '')[:10]
-                    r_date_str = f"{r_date[8:10]}.{r_date[5:7]}.{r_date[0:4]}" if len(r_date) == 10 else r_date
+                    r_date_str = f"{r_date[8:10]}-{r_date[5:7]}-{r_date[0:4]}" if len(r_date) == 10 else r_date
                     r_name = r.get('name', 'Rennen')
                     
                     dist_m = r.get('distance')
@@ -2280,7 +2580,7 @@ with tabs[1]:
 
             # Feste Farbzuordnung für alle Workouts erstellen, chronologisch sortiert
             df_all_user_workouts = df_all_user_workouts.sort_values(by='date_dt')
-            df_all_user_workouts['date_fmt'] = df_all_user_workouts['date_dt'].dt.strftime('%d.%m.%Y')
+            df_all_user_workouts['date_fmt'] = df_all_user_workouts['date_dt'].dt.strftime('%d-%m-%Y')
             all_possible_workouts = (df_all_user_workouts['date_fmt'] + " (" + df_all_user_workouts['type'] + ")").unique()
             all_possible_workouts = list(dict.fromkeys(all_possible_workouts))
             plotly_colors = px.colors.qualitative.Plotly
@@ -2297,7 +2597,7 @@ with tabs[1]:
                     else:
                         for idx, row in df_workouts.iterrows():
                             col_check, col_del = st.columns([0.85, 0.15])
-                            date_str = row['date_dt'].strftime('%d.%m.%Y')
+                            date_str = row['date_dt'].strftime('%d-%m-%Y')
                             is_sel = row['id'] in st.session_state['eval_selected_ids']
                             with col_check:
                                 st.checkbox(
@@ -2319,7 +2619,7 @@ with tabs[1]:
                         sel_rows = df_all_user_workouts[df_all_user_workouts['id'].isin(st.session_state['eval_selected_ids'])]
                         sel_rows = sel_rows.sort_values(by='date_dt', ascending=False)
                         for _, srow in sel_rows.iterrows():
-                            s_date_str = srow['date_dt'].strftime('%d.%m.%Y')
+                            s_date_str = srow['date_dt'].strftime('%d-%m-%Y')
                             st.markdown(f"- **{s_date_str}**: {srow['type']} ({srow['structure']})")
                         
                         if st.button("🗑️ Auswahl aufheben", use_container_width=True):
@@ -2350,7 +2650,7 @@ with tabs[1]:
                         show_micro = False
                         
                     df_compare['date_dt'] = pd.to_datetime(df_compare['date'], errors='coerce')
-                    df_compare['date_fmt'] = df_compare['date_dt'].dt.strftime('%d.%m.%Y')
+                    df_compare['date_fmt'] = df_compare['date_dt'].dt.strftime('%d-%m-%Y')
                     df_compare['Workout'] = df_compare['date_fmt'] + " (" + df_compare['type'] + ")"
                     
                     if has_micro and not show_micro:
@@ -2365,6 +2665,8 @@ with tabs[1]:
                         
                         if not fallback_micros.empty:
                             agg_dict = {'avg_power': 'mean', 'avg_hr': 'mean', 'max_hr': 'max', 'duration_sec': 'sum', 'date': 'first', 'type': 'first', 'date_dt': 'first'}
+                            if 'workout_id' in fallback_micros.columns: agg_dict['workout_id'] = 'first'
+                            if 'intervals_activity_id' in fallback_micros.columns: agg_dict['intervals_activity_id'] = 'first'
                             for col in ['std_hr', 'avg_hr_p', 'intervall_eff', 'NP_int', 'time_above_88_hr']:
                                 if col in fallback_micros.columns: agg_dict[col] = 'mean'
                                 
@@ -2390,8 +2692,8 @@ with tabs[1]:
                     # Dynamische Spaltenauswahl
                     optional_cols = st.multiselect(
                         "Zusätzliche Tabellenspalten anzeigen:",
-                        options=["Eff.", "Max HF %", "± HF", "Dauer", ">= 88% HF"],
-                        default=["Eff.", "Max HF %", "± HF", "Dauer", ">= 88% HF"]
+                        options=["Eff.", "Max HF %", "Dauer", ">= 88% HF"],
+                        default=["Eff.", "Max HF %", "Dauer", ">= 88% HF"]
                     )
                     
                     unique_workouts = sorted_workouts
@@ -2409,7 +2711,11 @@ with tabs[1]:
                             sub_df = df_compare[df_compare['Workout'] == w].copy()
                             
                             display_df = pd.DataFrame()
-                            display_df['Int.'] = sub_df['interval_num'].apply(lambda x: f"Block {x//100} - {x%100:02d}" if x > 100 else str(x))
+                            display_df['Int.'] = sub_df['interval_num'].apply(
+                                lambda x: f"Block {x//100} Avg" if isinstance(x, (int, float)) and x >= 100 and x % 100 == 0 
+                                else (f"B{x//100}.{x%100:02d}" if isinstance(x, (int, float)) and x > 100 
+                                else str(x))
+                            )
                             display_df['Ø W'] = sub_df['avg_power']
                             
                             has_max_hr = str(stats['Max HR']).isdigit() and int(stats['Max HR']) > 0
@@ -2426,10 +2732,13 @@ with tabs[1]:
                                     display_df['Max HF %'] = sub_df['max_hr'] / max_hr_val * 100
                                 else:
                                     display_df['Max HF'] = sub_df['max_hr']
-                            if "± HF" in optional_cols: display_df['± HF'] = sub_df['std_hr'] if 'std_hr' in sub_df.columns else 0
                             if "Dauer" in optional_cols: display_df['Dauer'] = sub_df['duration_sec'].apply(lambda x: f"{int(x // 60):02d}:{int(x % 60):02d}")
                             if ">= 88% HF" in optional_cols:
-                                display_df['>= 88% HF'] = sub_df['time_above_88_hr'].apply(lambda x: f"{int((x if pd.notnull(x) else 0) // 60):02d}:{int((x if pd.notnull(x) else 0) % 60):02d}") if 'time_above_88_hr' in sub_df.columns else "00:00"
+                                total_88_sec_w = sub_df['time_above_88_hr'].sum() if 'time_above_88_hr' in sub_df.columns else 0
+                                if pd.isna(total_88_sec_w): total_88_sec_w = 0
+                                total_88_str_w = f"{int(total_88_sec_w // 60):02d}:{int(total_88_sec_w % 60):02d}"
+                                new_header_88_w = f">= 88% HF (Σ {total_88_str_w})"
+                                display_df[new_header_88_w] = sub_df['time_above_88_hr'].apply(lambda x: f"{int((x if pd.notnull(x) else 0) // 60):02d}:{int((x if pd.notnull(x) else 0) % 60):02d}") if 'time_above_88_hr' in sub_df.columns else "00:00"
                             
                             # Average Row hinzufügen
                             avg_row = {"Int.": "Ø Gesamt"}
@@ -2447,15 +2756,13 @@ with tabs[1]:
                                     avg_row["Max HF %"] = display_df['Max HF %'].mean()
                                 else:
                                     avg_row["Max HF"] = sub_df['max_hr'].mean()
-                            if "± HF" in optional_cols:
-                                avg_row["± HF"] = sub_df['std_hr'].mean() if 'std_hr' in sub_df.columns else 0
                             if "Dauer" in optional_cols:
                                 mean_dur = sub_df['duration_sec'].mean()
                                 avg_row["Dauer"] = f"{int(mean_dur // 60):02d}:{int(mean_dur % 60):02d}"
                             if ">= 88% HF" in optional_cols:
                                 mean_88 = sub_df['time_above_88_hr'].mean() if 'time_above_88_hr' in sub_df.columns else 0
                                 if pd.isna(mean_88): mean_88 = 0
-                                avg_row[">= 88% HF"] = f"{int(mean_88 // 60):02d}:{int(mean_88 % 60):02d}"
+                                avg_row[new_header_88_w] = f"{int(mean_88 // 60):02d}:{int(mean_88 % 60):02d}"
                                 
                             display_df = pd.concat([display_df, pd.DataFrame([avg_row])], ignore_index=True)
 
@@ -2471,7 +2778,6 @@ with tabs[1]:
                                     format_dict["Max HF %"] = "{:.0f} %"
                                 else:
                                     format_dict["Max HF"] = "{:.0f}"
-                            if "± HF" in optional_cols: format_dict["± HF"] = "{:.1f}"
                             
                             styled_df = display_df.style.format(format_dict).set_properties(**{'text-align': 'center'}).set_table_styles([{'selector': 'th', 'props': [('text-align', 'center')]}])
                             
@@ -2501,6 +2807,59 @@ with tabs[1]:
                             st.plotly_chart(fig4, use_container_width=True)
 
                     st.markdown("---")
+                    st.markdown("#### 📈 Herzfrequenz-Kurven Vergleich (Live aus der Cloud)")
+                    st.info("💡 Die kumulierte Herzfrequenz-Kurve wird in Echtzeit aus den hochauflösenden Cloud-Daten berechnet.")
+                    
+                    if st.button("📈 HF-Kurven für ausgewählte Workouts laden", use_container_width=True, key="load_live_hr_curves"):
+                        st.session_state['eval_show_hr_curves'] = True
+                        
+                    if st.session_state.get('eval_show_hr_curves'):
+                        with st.spinner("Berechne Herzfrequenz-Kurven..."):
+                            fig_hr_comp = go.Figure()
+                            curves_found = False
+                            for w in unique_workouts:
+                                sub_df = df_compare[df_compare['Workout'] == w]
+                                act_id = sub_df['intervals_activity_id'].iloc[0] if 'intervals_activity_id' in sub_df.columns else None
+                                
+                                clean_act_id = None
+                                if pd.notna(act_id) and str(act_id).strip() not in ["", "None", "nan"]:
+                                    clean_act_id = str(act_id).strip()
+                                    if clean_act_id.endswith(".0"): clean_act_id = clean_act_id[:-2]
+                                    
+                                if clean_act_id:
+                                    df_live = get_activity_df(clean_act_id, athlete_row['api_key'])
+                                    if not df_live.empty and 'heart_rate' in df_live.columns:
+                                        hr_data = df_live['heart_rate'].dropna()
+                                        if not hr_data.empty:
+                                            hr_sorted = np.sort(hr_data)[::-1]
+                                            time_min = np.arange(1, len(hr_sorted) + 1) / 60.0
+                                            color = global_color_map.get(w, '#FF3333')
+                                            fig_hr_comp.add_trace(go.Scatter(x=time_min, y=hr_sorted, mode='lines', name=w, line=dict(color=color, width=2)))
+                                            curves_found = True
+                                        else:
+                                            st.warning(f"⚠️ Das Workout '{w}' enthält keine Herzfrequenz-Daten in der Cloud.")
+                                    elif not df_live.empty:
+                                        st.warning(f"⚠️ Das Workout '{w}' enthält keine Herzfrequenz-Daten in der Cloud.")
+                                    else:
+                                        st.warning(f"❌ Die Rohdaten für '{w}' konnten nicht geladen werden (Weder als Parquet noch über die Cloud-API).")
+                                else:
+                                    st.info(f"ℹ️ '{w}' hat keine verknüpfte Cloud-ID (evtl. manuell importiert).")
+                            
+                            if curves_found:
+                                fig_hr_comp.update_layout(
+                                    template="plotly_dark",
+                                    xaxis_title="Kumulierte Zeit (logarithmisch)",
+                                    yaxis_title="Herzfrequenz (bpm)",
+                                    margin=dict(l=0, r=0, t=10, b=0),
+                                    height=500,
+                                    hovermode="x unified"
+                                )
+                                fig_hr_comp.update_xaxes(type="log", tickvals=[0.1, 1, 5, 10, 30, 60, 120, 240], ticktext=["6s", "1m", "5m", "10m", "30m", "1h", "2h", "4h"])
+                                st.plotly_chart(fig_hr_comp, use_container_width=True, key="hr_curve_comp_chart")
+                            else:
+                                st.warning("Für die ausgewählten Workouts konnten keine Herzfrequenz-Daten in der Cloud gefunden werden.")
+
+                    st.markdown("---")
                     st.markdown("#### 🗺️ GPS Routen (Live aus der Cloud)")
                     st.info("💡 GPS-Daten verbrauchen extrem viel Speicherplatz und werden deshalb nicht in deiner Datenbank abgelegt. Stattdessen zieht das Dashboard die Karte in Echtzeit basierend auf der Workout-ID aus der Cloud (Intervals.icu)!")
                     
@@ -2513,8 +2872,13 @@ with tabs[1]:
                                 sub_df = df_compare[df_compare['Workout'] == w]
                                 act_id = sub_df['intervals_activity_id'].iloc[0] if 'intervals_activity_id' in sub_df.columns else None
                                 
-                                if pd.notna(act_id) and str(act_id).strip() != "" and str(act_id) != "None":
-                                    df_map_live = get_activity_df(act_id, athlete_row['api_key'])
+                                clean_act_id = None
+                                if pd.notna(act_id) and str(act_id).strip() not in ["", "None", "nan"]:
+                                    clean_act_id = str(act_id).strip()
+                                    if clean_act_id.endswith(".0"): clean_act_id = clean_act_id[:-2]
+                                    
+                                if clean_act_id:
+                                    df_map_live = get_activity_df(clean_act_id, athlete_row['api_key'])
                                     if not df_map_live.empty:
                                         try:
                                             
@@ -2543,13 +2907,13 @@ with tabs[1]:
                                         except Exception as e:
                                             st.error(f"Fehler beim Laden der Karte für {w}: {e}")
                                     else:
-                                        st.warning(f"Konnte die Daten für {w} nicht aus der Cloud laden.")
+                                        st.warning(f"❌ Die Rohdaten für '{w}' konnten nicht geladen werden (Weder als Parquet noch über die Cloud-API).")
                                 else:
                                     st.info(f"Das Workout '{w}' hat keine verknüpfte Cloud-ID (wurde vermutlich lokal importiert).")
                 else:
                     st.warning("⚠️ Zu diesem Workout wurden keine Intervall-Daten gefunden (vermutlich ein alter/fehlerhafter Speicherstand). Bitte lösche das Workout über den 🗑️-Button und speichere es neu aus der Cloud ein.")
 
-with tabs[2]:
+with tabs[3]:
     st.subheader("📈 Trendanalyse")
     
     authorized_athletes_trend = get_authorized_athletes(st.session_state['user'], st.session_state['role'], st.session_state.get('user_id'))
@@ -2602,7 +2966,7 @@ with tabs[2]:
         else:
             conn = get_db_connection()
             try:
-                df_all_ints = conn.query("SELECT workout_id, duration_sec, interval_num FROM intervals WHERE workout_id IN (SELECT id FROM workouts WHERE user_id = :uid)", params={"uid": uid_val_trend}, ttl=60)
+                df_all_ints = conn.query("SELECT workout_id, duration_sec, interval_num FROM intervals WHERE workout_id IN (SELECT id FROM workouts WHERE user_id = :uid)", params={"uid": uid_val_trend}, ttl=0)
             except Exception:
                 df_all_ints = pd.DataFrame()
                 
