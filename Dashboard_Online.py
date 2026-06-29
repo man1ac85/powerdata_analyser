@@ -14,6 +14,8 @@ import requests
 from requests.auth import HTTPBasicAuth
 from sqlalchemy import text
 import warnings
+import time
+from contextlib import contextmanager
 
 warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 
@@ -130,6 +132,11 @@ def get_athlete_stats_from_intervals(api_key, athlete_id):
 def get_db_connection():
     # Streamlit connection (nutzt automatisch psycopg3, wenn in requirements.txt)
     return st.connection("postgresql", type="sql", url=st.secrets["DB_URL"])
+
+@st.cache_resource
+def get_supabase_client():
+    from supabase import create_client
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
     
 def check_and_add_eff_loss_column():
     conn = get_db_connection()
@@ -139,6 +146,20 @@ def check_and_add_eff_loss_column():
             s.commit()
     except Exception: pass
 check_and_add_eff_loss_column()
+
+@contextmanager
+def perf_track(label):
+    """Context manager for performance tracking. Stores timings in st.session_state['_perf']."""
+    if not globals().get('PROFILING', False):
+        yield
+        return
+    if "_perf" not in st.session_state:
+        st.session_state["_perf"] = []
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        st.session_state["_perf"].append((label, time.perf_counter() - t0))
 
 def render_analysis_ui(df, filename, active_user_id, selected_activity_id, default_min_power, ftp_val, is_admin, key_suffix="", is_bulk=False):
     try:
@@ -213,7 +234,8 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                 detected_type = "UNKNOWN"
                     
             if detected_type == "UNKNOWN":
-                past_workouts = fetch_workouts_from_db(active_user_id)
+                with perf_track(f"[render:{key_suffix}] fetch_workouts_from_db (Typ-Erkennung)"):
+                    past_workouts = fetch_workouts_from_db(active_user_id)
                 if not past_workouts.empty and 'int_count' in past_workouts.columns:
                     valid_past = past_workouts[past_workouts['type'].isin(["LIT", "MIT", "HIT", "HIT 40/20"])].dropna(subset=['int_count', 'int_length']).copy()
                     if not valid_past.empty:
@@ -271,15 +293,16 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
             edge_ignore_sec = 120
         
         if 'power' in df.columns:
-            df['p_clean'] = df['power'].fillna(0)
-            df['p_sg'] = savgol_filter(df['p_clean'].rolling(7, center=True, min_periods=1).median(), window_length=sg_win, polyorder=2)
-            
-            p_deriv_raw = savgol_filter(df['p_clean'].rolling(7, center=True, min_periods=1).median(), window_length=sg_win, polyorder=2, deriv=1)
-            deriv_win = 21 if len(df) >= 21 else (len(df) - 1 if len(df) % 2 == 0 else len(df))
-            df['p_deriv'] = savgol_filter(p_deriv_raw, window_length=max(3, deriv_win), polyorder=2)
-            
-            df['power_roll_30'] = df['p_clean'].rolling(window=30, min_periods=1).mean()
-            
+            with perf_track(f"[render:{key_suffix}] Signal-Filter (SG)"):
+                df['p_clean'] = df['power'].fillna(0)
+                df['p_sg'] = savgol_filter(df['p_clean'].rolling(7, center=True, min_periods=1).median(), window_length=sg_win, polyorder=2)
+
+                p_deriv_raw = savgol_filter(df['p_clean'].rolling(7, center=True, min_periods=1).median(), window_length=sg_win, polyorder=2, deriv=1)
+                deriv_win = 21 if len(df) >= 21 else (len(df) - 1 if len(df) % 2 == 0 else len(df))
+                df['p_deriv'] = savgol_filter(p_deriv_raw, window_length=max(3, deriv_win), polyorder=2)
+
+                df['power_roll_30'] = df['p_clean'].rolling(window=30, min_periods=1).mean()
+
             if mode_type == "Automatisch (Algorithmus)":
                 if is_ride_analysis:
                     total_sec = len(df)
@@ -587,7 +610,8 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                     if not user_data.empty:
                         tmp_api = user_data.iloc[0]['api_key']
                         tmp_int = user_data.iloc[0].get('intervals_id', '0')
-                        stats = get_athlete_stats_from_intervals(tmp_api, tmp_int)
+                        with perf_track(f"[render:{key_suffix}] get_athlete_stats_from_intervals"):
+                            stats = get_athlete_stats_from_intervals(tmp_api, tmp_int)
                 except Exception:
                     pass
 
@@ -1026,7 +1050,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
             drag_behavior = "select" if mode_type == "Manuell (Grafische Auswahl)" else "zoom"
             fig_main.update_layout(template="plotly_dark", height=plot_height, hovermode="x unified", margin=dict(l=0, r=0, t=20, b=0), legend=dict(yanchor="top", y=1), dragmode=drag_behavior)
             
-            selected_data = st.plotly_chart(fig_main, use_container_width=True, on_select="rerun", key=f"chart_{key_suffix}")
+            selected_data = st.plotly_chart(fig_main, width='stretch', on_select="rerun", key=f"chart_{key_suffix}")
             
             has_gps = False
             if 'position_lat' in df.columns and 'position_long' in df.columns:
@@ -1068,7 +1092,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                         ))
                         
                     fig_map.update_layout(mapbox_style="open-street-map", mapbox=dict(center=dict(lat=df_map['lat'].mean(), lon=df_map['lon'].mean()), zoom=10), margin=dict(l=0, r=0, t=0, b=0), height=450, showlegend=False)
-                    st.plotly_chart(fig_map, use_container_width=True, key=f"map_{key_suffix}")
+                    st.plotly_chart(fig_map, width='stretch', key=f"map_{key_suffix}")
                 if has_hr:
                     with st.expander("📈 Herzfrequenz-Kurve (Time in Zone)", expanded=False):
                         hr_data_full = df['heart_rate'].dropna()
@@ -1087,7 +1111,7 @@ def render_analysis_ui(df, filename, active_user_id, selected_activity_id, defau
                                 hovermode="x unified"
                             )
                         fig_hr_curve.update_xaxes(type="log", tickvals=[0.1, 1, 5, 10, 30, 60, 120, 240], ticktext=["6s", "1m", "5m", "10m", "30m", "1h", "2h", "4h"])
-                        st.plotly_chart(fig_hr_curve, use_container_width=True, key=f"hr_curve_{key_suffix}")
+                        st.plotly_chart(fig_hr_curve, width='stretch', key=f"hr_curve_{key_suffix}")
             
             if mode_type == "Manuell (Grafische Auswahl)":
                 st.markdown("### Manuelle Intervall-Bearbeitung")
@@ -1186,6 +1210,10 @@ if 'user_id' not in st.session_state: st.session_state['user_id'] = None
 # --- LOKALER DEV-MODUS (AUTO-LOGIN) ---
 AUTO_LOGIN = True  # <--- Auf False setzen, bevor du den Code produktiv stellst!
 AUTO_LOGIN_USERNAME = "Bastian"  # <--- Trage hier deinen Datenbank-Benutzernamen ein
+PROFILING = True   # <--- Auf False setzen für Produktion; zeigt Performance-Monitor in der Sidebar
+
+if PROFILING:
+    st.session_state["_perf"] = []  # Reset bei jedem Script-Run
 
 if AUTO_LOGIN and not st.session_state['logged_in']:
     conn = get_db_connection()
@@ -1420,30 +1448,41 @@ def download_original_fit_file(api_key, activity_id):
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_activity_df(act_id, api_key):
     """Lädt DataFrame bevorzugt aus Parquet. Falls nicht, via FIT-Download oder als Fallback über die Streams API."""
+    _t0 = time.perf_counter()
     clean_act_id = str(act_id).strip()
     if clean_act_id.endswith(".0"): clean_act_id = clean_act_id[:-2]
     if clean_act_id in ["", "None", "nan"]: return pd.DataFrame()
-    
+
     if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
         try:
-            from supabase import create_client
-            sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+            _t_sb = time.perf_counter()
+            sb = get_supabase_client()
+            _t_sb_conn = time.perf_counter()
             res_bytes = sb.storage.from_("workouts").download(f"workout_{clean_act_id}.parquet")
-            return pd.read_parquet(io.BytesIO(res_bytes))
-        except Exception:
+            _t_sb_dl = time.perf_counter()
+            result = pd.read_parquet(io.BytesIO(res_bytes))
+            print(f"[PERF] get_activity_df → Supabase-Client: {(_t_sb_conn-_t_sb)*1000:.0f}ms | Download: {(_t_sb_dl-_t_sb_conn)*1000:.0f}ms | read_parquet: {(time.perf_counter()-_t_sb_dl)*1000:.0f}ms | GESAMT: {(time.perf_counter()-_t0)*1000:.0f}ms [HIT]")
+            return result
+        except Exception as e:
+            print(f"[PERF] get_activity_df → Supabase MISS ({e.__class__.__name__}: {e}) nach {(time.perf_counter()-_t0)*1000:.0f}ms")
             pass
-            
+
     df_fit = pd.DataFrame()
+    _t_fit = time.perf_counter()
     bin_data, _ = download_original_fit_file(api_key, clean_act_id)
+    print(f"[PERF] get_activity_df → download_original_fit_file: {(time.perf_counter()-_t_fit)*1000:.0f}ms")
     if bin_data:
         try:
+            _t_parse = time.perf_counter()
+            _fit_fields = {'timestamp', 'power', 'heart_rate', 'cadence', 'speed', 'distance', 'altitude', 'position_lat', 'position_long'}
             fitfile = fitparse.FitFile(io.BytesIO(bin_data))
-            records = [r.get_values() for r in fitfile.get_messages('record')]
+            records = [{k: v for k, v in r.get_values().items() if k in _fit_fields} for r in fitfile.get_messages('record')]
             df_fit = pd.DataFrame(records)
+            print(f"[PERF] get_activity_df → FIT-Parse ({len(records)} records): {(time.perf_counter()-_t_parse)*1000:.0f}ms")
             if not df_fit.empty and 'timestamp' in df_fit.columns:
                 df_fit['timestamp'] = pd.to_datetime(df_fit['timestamp'])
                 df_fit.set_index('timestamp', inplace=True)
-        except Exception: 
+        except Exception:
             pass
 
     # Fallback auf Streams API
@@ -1451,6 +1490,7 @@ def get_activity_df(act_id, api_key):
         url = f"https://intervals.icu/api/v1/activity/{clean_act_id}/streams"
         try:
             params = {"types": "time,watts,heartrate,latlng,altitude"}
+            _t_streams = time.perf_counter()
             response = requests.get(url, params=params, auth=HTTPBasicAuth('API_KEY', api_key), timeout=15)
             if response.status_code == 200:
                 streams = response.json()
@@ -1470,6 +1510,7 @@ def get_activity_df(act_id, api_key):
                     if "heartrate" in df_fit.columns: df_fit.rename(columns={"heartrate": "heart_rate"}, inplace=True)
                     df_fit['timestamp'] = pd.Timestamp("2024-01-01") + pd.to_timedelta(df_fit['time'], unit='s')
                     df_fit.set_index('timestamp', inplace=True)
+                    print(f"[PERF] get_activity_df → Streams-API: {(time.perf_counter()-_t_streams)*1000:.0f}ms")
         except Exception:
             pass
 
@@ -1480,11 +1521,13 @@ def get_activity_df(act_id, api_key):
             parquet_buffer = io.BytesIO()
             df_fit.to_parquet(parquet_buffer, engine='pyarrow', index=True)
             parquet_buffer.seek(0)
-            from supabase import create_client
-            sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+            sb = get_supabase_client()
+            _t_up = time.perf_counter()
             sb.storage.from_("workouts").upload(f"workout_{clean_act_id}.parquet", parquet_buffer.read(), {"content-type": "application/octet-stream"})
+            print(f"[PERF] get_activity_df → Supabase-Upload: {(time.perf_counter()-_t_up)*1000:.0f}ms")
         except Exception: pass
-        
+
+    print(f"[PERF] get_activity_df → GESAMT (MISS-Pfad): {(time.perf_counter()-_t0)*1000:.0f}ms")
     return df_fit
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -1768,7 +1811,7 @@ with tabs[4]:
             fig = px.line(x=x_vals, y=y_vals)
             fig.update_traces(line_shape='hv', line=dict(color='#FFA500', width=2))
             fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0,r=0,t=10,b=0), xaxis_title="Zeit (Sekunden)", yaxis_title="Watt")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
             
             st.markdown("#### 💾 Exportieren")
             c_exp1, c_exp2 = st.columns([1, 1])
@@ -1909,8 +1952,7 @@ if len(tabs) > 5:
                 if "SUPABASE_URL" not in st.secrets or "SUPABASE_KEY" not in st.secrets:
                     st.error("Bitte füge SUPABASE_URL und SUPABASE_KEY in deine st.secrets (secrets.toml) ein!")
                 else:
-                    from supabase import create_client
-                    sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+                    sb = get_supabase_client()
                     
                     conn = get_db_connection()
                     workouts = conn.query("SELECT id, intervals_activity_id, user_id FROM workouts WHERE intervals_activity_id IS NOT NULL", ttl=0)
@@ -2152,7 +2194,8 @@ with tabs[0]:
 
         if 'ftp_cache' not in st.session_state: st.session_state['ftp_cache'] = {}
         if active_user_id not in st.session_state['ftp_cache']:
-            stats = get_athlete_stats_from_intervals(api_k, intervals_id)
+            with perf_track("[tabs[0]] get_athlete_stats_from_intervals"):
+                stats = get_athlete_stats_from_intervals(api_k, intervals_id)
             st.session_state['ftp_cache'][active_user_id] = stats.get("FTP", 0)
             
         ftp_val = st.session_state['ftp_cache'][active_user_id]
@@ -2164,7 +2207,8 @@ with tabs[0]:
             pass
 
         with st.spinner("Synchronisiere Aktivitäten..."):
-            events, err = fetch_calendar_events(api_k, start_date, end_date)
+            with perf_track("[tabs[0]] fetch_calendar_events"):
+                events, err = fetch_calendar_events(api_k, start_date, end_date)
             
         if events:
             conn = get_db_connection()
@@ -2227,7 +2271,8 @@ with tabs[0]:
                         selected_activity_id = df_cockpit.iloc[idx]["ID"]
                         filename = df_cockpit.iloc[idx]["Name"]
                         with st.spinner("Lade Workout..."):
-                            df_fetched = get_activity_df(selected_activity_id, api_k)
+                            with perf_track("[tabs[0]] get_activity_df"):
+                                df_fetched = get_activity_df(selected_activity_id, api_k)
                             if not df_fetched.empty:
                                 st.session_state['df'] = df_fetched
                 else:
@@ -2250,7 +2295,8 @@ with tabs[0]:
     # --- VERARBEITUNG & ALGORITHMUS ---
     if not df.empty:
         is_admin = st.session_state.get('role') == 'admin'
-        render_analysis_ui(df, filename, active_user_id, selected_activity_id, default_min_power, ftp_val, is_admin, key_suffix="main")
+        with perf_track("[tabs[0]] render_analysis_ui"):
+            render_analysis_ui(df, filename, active_user_id, selected_activity_id, default_min_power, ftp_val, is_admin, key_suffix="main")
     else:
         st.info("Bitte Athlet wählen oder Datei hochladen.")
 
@@ -2289,7 +2335,8 @@ with tabs[2]:
             search_query_fr = st.text_input("Suche:", key="fr_search_input")
 
         uid_val_fr = int(athlete_row_fr['id'])
-        df_workouts_fr = fetch_workouts_from_db(uid_val_fr)
+        with perf_track("[tabs[2]] fetch_workouts_from_db"):
+            df_workouts_fr = fetch_workouts_from_db(uid_val_fr)
         
         if not df_workouts_fr.empty:
             conn_fr = get_db_connection()
@@ -2411,7 +2458,7 @@ with tabs[2]:
                         fig1 = px.scatter(df_compare_fr, x="int_label", y="eff_loss", color="Workout", title="Efficiency Loss (W*min/bpm)", color_discrete_map=global_color_map_fr, category_orders={"Workout": sorted_workouts_fr})
                         fig1.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
                         if not show_micro_fr: fig1.update_xaxes(tick0=1, dtick=1)
-                        st.plotly_chart(fig1, use_container_width=True)
+                        st.plotly_chart(fig1, width='stretch')
                     with c_p2:
                         def determine_int_type(row):
                             combined = str(row.get('type', '')).upper() + " " + str(row.get('filename', '')).upper()
@@ -2458,7 +2505,7 @@ with tabs[2]:
                         fig2 = px.scatter(df_compare_fr, x="avg_power", y="eff_loss", color="Int_Type", symbol="Environment", color_discrete_map=color_map, symbol_map={'Indoor': 'circle', 'Outdoor': 'star'}, hover_data={'Workout': True, 'int_label': True, 'Int_Type': False, 'Environment': False}, title="Efficiency Loss vs. Ø Leistung (Intervall)")
                         fig2.update_traces(marker=dict(size=12, opacity=0.85, line=dict(width=1, color='rgba(255,255,255,0.3)')))
                         fig2.update_layout(template="plotly_dark", xaxis_title="Ø Watt (Intervall)", yaxis_title="Efficiency Loss (W*min/bpm)", legend_title="Typ & Umgebung")
-                        st.plotly_chart(fig2, use_container_width=True)
+                        st.plotly_chart(fig2, width='stretch')
 
 with tabs[1]:
     st.subheader("📊 Daten & Auswertung")
@@ -2497,9 +2544,10 @@ with tabs[1]:
 
         with c2:
             st.markdown("##### 👤 Profil")
-            
+
             # Dynamische Abfrage mittels Helper-Funktion
-            stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['intervals_id'])
+            with perf_track("[tabs[1]] get_athlete_stats_from_intervals"):
+                stats = get_athlete_stats_from_intervals(athlete_row['api_key'], athlete_row['intervals_id'])
             
             # W/kg Berechnung sicher machen (für den Fall, dass Werte "-" sind)
             ftp = stats["FTP"]
@@ -2534,7 +2582,8 @@ with tabs[1]:
             
             # --- ANSTEHENDE EVENTS ---
             st.markdown("##### 📅 Anstehende Events")
-            upcoming_races = fetch_upcoming_events(athlete_row['api_key'], athlete_row.get('intervals_id', '0'))
+            with perf_track("[tabs[1]] fetch_upcoming_events"):
+                upcoming_races = fetch_upcoming_events(athlete_row['api_key'], athlete_row.get('intervals_id', '0'))
             if upcoming_races:
                 events_html = "<ul style='margin-top: 0; padding-left: 20px; line-height: 1.4; font-size: 0.9rem;'>"
                 for r in upcoming_races[:3]:
@@ -2558,7 +2607,8 @@ with tabs[1]:
 
         # --- WORKOUT LOGIK ---
         uid_val = int(athlete_row['id'])
-        df_workouts = fetch_workouts_from_db(uid_val)
+        with perf_track("[tabs[1]] fetch_workouts_from_db"):
+            df_workouts = fetch_workouts_from_db(uid_val)
         
         if df_workouts.empty: 
             st.info(f"Keine Trainingsdaten für {selected_name} gefunden.")
@@ -2799,12 +2849,12 @@ with tabs[1]:
                             fig3.update_yaxes(title_text="bpm", secondary_y=False)
                             if str(stats['Max HR']).isdigit() and int(stats['Max HR']) > 0: fig3.update_yaxes(title_text="% Max HF", secondary_y=True, showgrid=False)
                             if not show_micro: fig3.update_xaxes(tick0=1, dtick=1)
-                            st.plotly_chart(fig3, use_container_width=True)
+                            st.plotly_chart(fig3, width='stretch')
                         with c_p4: 
                             fig4 = px.scatter(df_compare, x="int_label", y="intervall_eff", color="Workout", title="Efficiency (W/bpm)", color_discrete_map=global_color_map, category_orders={"Workout": sorted_workouts})
                             fig4.update_traces(mode='lines+markers').update_layout(template="plotly_dark")
                             if not show_micro: fig4.update_xaxes(tick0=1, dtick=1)
-                            st.plotly_chart(fig4, use_container_width=True)
+                            st.plotly_chart(fig4, width='stretch')
 
                     st.markdown("---")
                     st.markdown("#### 📈 Herzfrequenz-Kurven Vergleich (Live aus der Cloud)")
@@ -2855,7 +2905,7 @@ with tabs[1]:
                                     hovermode="x unified"
                                 )
                                 fig_hr_comp.update_xaxes(type="log", tickvals=[0.1, 1, 5, 10, 30, 60, 120, 240], ticktext=["6s", "1m", "5m", "10m", "30m", "1h", "2h", "4h"])
-                                st.plotly_chart(fig_hr_comp, use_container_width=True, key="hr_curve_comp_chart")
+                                st.plotly_chart(fig_hr_comp, width='stretch', key="hr_curve_comp_chart")
                             else:
                                 st.warning("Für die ausgewählten Workouts konnten keine Herzfrequenz-Daten in der Cloud gefunden werden.")
 
@@ -2899,7 +2949,7 @@ with tabs[1]:
                                                         name=w
                                                     ))
                                                     fig_map_live.update_layout(mapbox_style="open-street-map", mapbox=dict(center=dict(lat=df_map_live['lat'].mean(), lon=df_map_live['lon'].mean()), zoom=10), margin=dict(l=0, r=0, t=30, b=0), height=400, title=f"Route: {w}")
-                                                    st.plotly_chart(fig_map_live, use_container_width=True, key=f"map_live_{act_id}_{w}")
+                                                    st.plotly_chart(fig_map_live, width='stretch', key=f"map_live_{act_id}_{w}")
                                                 else:
                                                     st.warning(f"Keine verwertbaren GPS-Koordinaten in {w} gefunden.")
                                             else:
@@ -2930,7 +2980,8 @@ with tabs[3]:
 
         with c2:
             st.markdown("##### 👤 Profil")
-            stats_trend = get_athlete_stats_from_intervals(athlete_row_trend['api_key'], athlete_row_trend.get('intervals_id', '0'))
+            with perf_track("[tabs[3]] get_athlete_stats_from_intervals"):
+                stats_trend = get_athlete_stats_from_intervals(athlete_row_trend['api_key'], athlete_row_trend.get('intervals_id', '0'))
             
             ftp_t = stats_trend["FTP"]
             weight_t = stats_trend["Weight"]
@@ -2959,7 +3010,8 @@ with tabs[3]:
             st.markdown(profile_html_trend, unsafe_allow_html=True)
             
         uid_val_trend = int(athlete_row_trend['id'])
-        df_workouts_trend_raw = fetch_workouts_from_db(uid_val_trend)
+        with perf_track("[tabs[3]] fetch_workouts_from_db"):
+            df_workouts_trend_raw = fetch_workouts_from_db(uid_val_trend)
         
         if df_workouts_trend_raw.empty:
             st.info(f"Keine Trainingsdaten für {selected_name_trend} gefunden.")
@@ -3045,7 +3097,7 @@ with tabs[3]:
                     
                     fig_trend.update_layout(title=f"Entwicklung der Intervall-Efficiency ({filter_type_trend})", xaxis_title="Datum", yaxis_title="Efficiency (W/bpm)", template="plotly_dark", hovermode="x unified", margin=dict(l=0, r=0, t=40, b=0))
                     fig_trend.update_xaxes(tickformat="%d-%m-%Y")
-                    st.plotly_chart(fig_trend, use_container_width=True)
+                    st.plotly_chart(fig_trend, width='stretch')
                     
             st.markdown("---")
             st.markdown("#### 📊 Workout Verteilung & Zeiten")
@@ -3079,7 +3131,7 @@ with tabs[3]:
                                         color_discrete_sequence=px.colors.qualitative.Plotly)
                     fig_counts.update_layout(template="plotly_dark", showlegend=False, margin=dict(t=40, b=0, l=0, r=0), height=350)
                     fig_counts.update_traces(textposition='auto', texttemplate='%{y}')
-                    st.plotly_chart(fig_counts, use_container_width=True)
+                    st.plotly_chart(fig_counts, width='stretch')
                     
                 with c_chart2:
                     df_time = df_dist.groupby('type')['real_time'].sum().reindex(target_types, fill_value=0).reset_index()
@@ -3090,7 +3142,7 @@ with tabs[3]:
                                       color_discrete_sequence=px.colors.qualitative.Plotly)
                     fig_time.update_layout(template="plotly_dark", showlegend=False, margin=dict(t=40, b=0, l=0, r=0), height=350)
                     fig_time.update_traces(textposition='auto', texttemplate='%{y} Min')
-                    st.plotly_chart(fig_time, use_container_width=True)
+                    st.plotly_chart(fig_time, width='stretch')
                     
                 st.markdown("##### Verteilung nach Struktur (z.B. 4x6, 6x3)")
                 
@@ -3107,6 +3159,26 @@ with tabs[3]:
                                              color_discrete_sequence=[px.colors.qualitative.Plotly[idx % len(px.colors.qualitative.Plotly)]])
                             fig_sub.update_layout(template="plotly_dark", showlegend=False, xaxis_title=None, yaxis_title=None, margin=dict(l=0, r=0, t=30, b=0), height=300)
                             fig_sub.update_traces(textposition='auto', texttemplate='%{y}')
-                            st.plotly_chart(fig_sub, use_container_width=True)
+                            st.plotly_chart(fig_sub, width='stretch')
                         else:
                             st.info(f"Keine {w_type} Workouts.")
+
+# --- PERFORMANCE MONITOR SIDEBAR ---
+if PROFILING:
+    perf_log = st.session_state.get("_perf", [])
+    with st.sidebar.expander("⏱ Performance Monitor", expanded=True):
+        if not perf_log:
+            st.caption("Noch keine Timings – interagiere mit dem Dashboard.")
+        else:
+            total_ms = sum(e for _, e in perf_log) * 1000
+            st.caption(f"**Σ instrumentiert: {total_ms:.0f} ms**")
+            st.markdown("---")
+            for label, elapsed in sorted(perf_log, key=lambda x: x[1], reverse=True):
+                ms = elapsed * 1000
+                if ms >= 1000:
+                    color = "🔴"
+                elif ms >= 300:
+                    color = "🟡"
+                else:
+                    color = "🟢"
+                st.markdown(f"{color} `{label}`  \n&nbsp;&nbsp;&nbsp;&nbsp;→ **{ms:.0f} ms**")
